@@ -13,10 +13,11 @@ from scipy.stats import spearmanr
 data_dir = "data_1mb_resolution/"
 output_dir = "outputs/"  
 
-time_points = ['0.5hour', '1hour', '1.5hour', '2hour', '3hour', '4hour']
+#time_points = ['0.5hour', '1hour', '1.5hour', '2hour', '3hour', '4hour']
+time_points = ['0.5hour', '1hour', '1.5hour']
 embedding_dim = 128
 hidden_channels = 64
-out_channels = 32
+out_channels = 128
 learning_rate = 0.01
 epochs = 10
 
@@ -58,13 +59,15 @@ def generate_node2vec_embeddings(graph, dimensions=128, walk_length=30, num_walk
     return torch.tensor(embeddings, dtype=torch.float)
 
 class STGCN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels=128): 
+    def __init__(self, in_channels, hidden_channels, out_channels=128):  # Set out_channels to 128
         super(STGCN, self).__init__()
         self.gcn1 = GCNConv(in_channels, hidden_channels)
-        self.gcn2 = GCNConv(hidden_channels, out_channels) 
-        self.temporal_att = TransformerConv(out_channels, out_channels, heads=1)  
+        self.gcn2 = GCNConv(hidden_channels, 32)  # Keep 32 as intermediate dimension
+        self.temporal_att = TransformerConv(32, 32, heads=1)  # Transformer layer remains at 32 dimensions
+        self.fc = torch.nn.Linear(32, out_channels)  # Final linear layer to project to 128 dimensions
 
     def forward(self, x, edge_index, edge_weight=None):
+        # Input dimensions
         print(f"Input x shape: {x.shape}")
 
         x = self.gcn1(x, edge_index, edge_weight)
@@ -77,7 +80,12 @@ class STGCN(torch.nn.Module):
         x = self.temporal_att(x, edge_index)
         print(f"After TransformerConv x shape: {x.shape}")
 
+        # Project to 128 dimensions
+        x = self.fc(x)
+        print(f"After Linear layer x shape: {x.shape}")
+
         return x
+
 
 def calculate_dSCC(prediction, target):
     pred_flat = prediction.detach().cpu().numpy().flatten()
@@ -101,6 +109,8 @@ def train_and_test_chromosome(chrom, graph_sequence, epochs=10):
             x, edge_index, edge_weight = pyg_graph.x, pyg_graph.edge_index, pyg_graph.edge_attr
             optimizer.zero_grad()
             out = model(x, edge_index, edge_weight)
+            print(f"Shape of out: {out.shape}")
+            print(f"Shape of x: {x.shape}")
             loss = F.mse_loss(out, x)  
             loss.backward()
             optimizer.step()
