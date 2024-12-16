@@ -3,14 +3,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.data import Data, Batch
+from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
 import networkx as nx
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import seaborn as sns
-from matplotlib.animation import FuncAnimation
 
 class TemporalGraphDataset:
     def __init__(self, csv_file, seq_len=10, pred_len=1):
@@ -18,41 +17,38 @@ class TemporalGraphDataset:
         self.pred_len = pred_len
         self.df = pd.read_csv(csv_file)
         self.process_data()
-        
+    
     def process_data(self):
+        # Get time columns
         self.time_cols = [col for col in self.df.columns if 'Time_' in col]
         self.time_points = sorted(list(set([float(col.split('_')[-1]) 
                                           for col in self.time_cols if 'Gene1' in col])))
         
+        # Create node mapping
         unique_genes = pd.concat([self.df['Gene1'], self.df['Gene2']]).unique()
         self.node_map = {gene: idx for idx, gene in enumerate(unique_genes)}
         self.num_nodes = len(self.node_map)
         print(f"Number of nodes: {self.num_nodes}")
         
+        # Create graph structure from adjacency matrix
         self.G = self.create_graph_structure()
-        self.process_node_features()
-
-    def create_adjacency_matrix(self):
-        """Create adjacency matrix from HiC interactions"""
-        adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
         
+        # Process node features
+        self.process_node_features()
+    
+    def create_adjacency_matrix(self):
+        adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
         for _, row in self.df.iterrows():
             i = self.node_map[row['Gene1']]
             j = self.node_map[row['Gene2']]
             adj_matrix[i, j] = row['HiC_Interaction']
             adj_matrix[j, i] = row['HiC_Interaction']
-        
         return adj_matrix
-
+    
     def create_graph_structure(self):
-        """Create graph structure from adjacency matrix"""
-        # Create adjacency matrix
         adj_matrix = self.create_adjacency_matrix()
-        
-        # Create networkx graph
         G = nx.from_numpy_array(adj_matrix)
         
-        # Convert to PyG format
         edge_index = []
         edge_weights = []
         
@@ -61,44 +57,85 @@ class TemporalGraphDataset:
             edge_weights.append(d['weight'])
         
         edge_index = torch.tensor(edge_index).t().contiguous()
+        print(f"edge index: {edge_index}")
         edge_weights = torch.tensor(edge_weights, dtype=torch.float)
+        print(f"edge weights: {edge_weights}")
         
         # Normalize edge weights
-        edge_weights = (edge_weights - edge_weights.mean()) / edge_weights.std()
+        edge_weights = (edge_weights - edge_weights.mean()) / (edge_weights.std() + 1e-6)
+        print(f"Normalized edge weights: {edge_weights}")
         
         self.edge_index = edge_index
         self.edge_attr = edge_weights.unsqueeze(1)
         
-        print(f"Graph structure created:")
-        print(f"Adjacency matrix shape: {adj_matrix.shape}")
-        print(f"Edge index shape: {self.edge_index.shape}")
-        print(f"Edge weights shape: {self.edge_attr.shape}")
+        #print("Graph structure created:")
+        #print(f"Adjacency matrix shape: {adj_matrix.shape}")
+        #print(f"Edge index shape: {self.edge_index.shape}")
+        #print(f"Edge weights shape: {self.edge_attr.shape}")
+        
+        if torch.isnan(self.edge_index).any():
+            print("NaN found in edge index")
+        if torch.isnan(self.edge_attr).any():
+            print("NaN found in edge weights")
+        if (self.edge_attr == 0).all():
+            print("Warning: All edge weights are zero")
         
         return G
     
     def process_node_features(self):
-        """Process node features for each time point"""
+        """Process node features with normalization"""
         self.node_features = {}
         
+        # Create scalers for each feature type
+        self.scalers = [StandardScaler() for _ in range(4)]
+        
+        # Collect all features for fitting scalers
+        all_features = {i: [] for i in range(4)}
+        for t in self.time_points:
+            for gene in self.node_map.keys():
+                gene_data = self.df[(self.df['Gene1'] == gene) | 
+                                  (self.df['Gene2'] == gene)].iloc[0]
+                #print(f"For {gene} gene data is: {gene_data}")
+                features = [
+                    gene_data[f'Gene1_Time_{t}'] if gene == gene_data['Gene1'] 
+                    else gene_data[f'Gene2_Time_{t}'],
+                    1 if ((gene == gene_data['Gene1'] and gene_data['Gene1_Compartment'] == 'A') or
+                         (gene == gene_data['Gene2'] and gene_data['Gene2_Compartment'] == 'A')) else 0,
+                    gene_data['Gene1_TAD_Boundary_Distance'] if gene == gene_data['Gene1']
+                    else gene_data['Gene2_TAD_Boundary_Distance'],
+                    gene_data['Gene1_Insulation_Score'] if gene == gene_data['Gene1']
+                    else gene_data['Gene2_Insulation_Score']
+                ]
+                
+                for i, feat in enumerate(features):
+                    all_features[i].append(feat)
+        
+        # Fit scalers
+        for i in range(4):
+            if i != 1:  # Don't normalize binary compartment feature
+                self.scalers[i].fit(np.array(all_features[i]).reshape(-1, 1))
+        
+        # Transform features
         for t in self.time_points:
             features = []
             for gene in self.node_map.keys():
                 gene_data = self.df[(self.df['Gene1'] == gene) | 
                                   (self.df['Gene2'] == gene)].iloc[0]
                 
-                # Get features
-                expr = gene_data[f'Gene1_Time_{t}'] if gene == gene_data['Gene1'] \
-                      else gene_data[f'Gene2_Time_{t}']
-                comp = 1 if (gene == gene_data['Gene1'] and gene_data['Gene1_Compartment'] == 'A') or \
-                          (gene == gene_data['Gene2'] and gene_data['Gene2_Compartment'] == 'A') else 0
-                tad = gene_data['Gene1_TAD_Boundary_Distance'] if gene == gene_data['Gene1'] \
-                      else gene_data['Gene2_TAD_Boundary_Distance']
-                ins = gene_data['Gene1_Insulation_Score'] if gene == gene_data['Gene1'] \
-                      else gene_data['Gene2_Insulation_Score']
+                # Get and normalize features
+                expr = self.scalers[0].transform([[gene_data[f'Gene1_Time_{t}'] if gene == gene_data['Gene1']
+                        else gene_data[f'Gene2_Time_{t}']]])[0][0]
+                comp = 1 if ((gene == gene_data['Gene1'] and gene_data['Gene1_Compartment'] == 'A') or
+                           (gene == gene_data['Gene2'] and gene_data['Gene2_Compartment'] == 'A')) else 0
+                tad = self.scalers[2].transform([[gene_data['Gene1_TAD_Boundary_Distance'] if gene == gene_data['Gene1']
+                        else gene_data['Gene2_TAD_Boundary_Distance']]])[0][0]
+                ins = self.scalers[3].transform([[gene_data['Gene1_Insulation_Score'] if gene == gene_data['Gene1']
+                        else gene_data['Gene2_Insulation_Score']]])[0][0]
                 
                 features.append([expr, comp, tad, ins])
             
             self.node_features[t] = torch.tensor(features, dtype=torch.float)
+            #print(f"Features for the nodes: {self.node_features}")
     
     def create_graph(self, time_point):
         return Data(
@@ -113,10 +150,7 @@ class TemporalGraphDataset:
         labels = []
         
         for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
-            # Create sequence of graphs
             seq_graphs = [self.create_graph(t) for t in self.time_points[i:i+self.seq_len]]
-            
-            # Create label graphs
             label_graphs = [self.create_graph(t) for t in 
                           self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]]
             
@@ -131,24 +165,37 @@ class STGCNLayer(nn.Module):
         self.temporal_conv = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
         self.spatial_conv = GCNConv(out_channels, out_channels)
         self.batch_norm = nn.BatchNorm1d(out_channels)
+        self.layer_norm = nn.LayerNorm(out_channels)
         
     def forward(self, x, edge_index, edge_weight):
-        batch_size = len(x)  # Number of graphs in sequence
+        # Add small epsilon to avoid division by zero
+        edge_weight = edge_weight + 1e-6
         
-        # Process temporal dimension
-        x_combined = torch.stack(x)  # [seq_len, num_nodes, features]
-        x_combined = x_combined.permute(1, 2, 0)  # [num_nodes, features, seq_len]
-        x_combined = self.temporal_conv(x_combined)  # Temporal convolution
-        x_combined = x_combined.permute(0, 2, 1)  # [num_nodes, seq_len, features]
+        # Stack and normalize input
+        x_combined = torch.stack(x)
+        x_combined = torch.clamp(x_combined, min=-100, max=100)
+        #print(f"Before temporal convolution: min={x_combined.min().item()}, max={x_combined.max().item()}, mean={x_combined.mean().item()}")
+
         
-        # Process spatial dimension for each time step
+        # Temporal convolution
+        x_combined = x_combined.permute(1, 2, 0)
+        x_combined = self.temporal_conv(x_combined)
+        x_combined = x_combined.permute(0, 2, 1)
+        
+        #print(f"After temporal convolution: min={x_combined.min().item()}, max={x_combined.max().item()}, mean={x_combined.mean().item()}")
+        
+        # Layer normalization
+        x_combined = self.layer_norm(x_combined)
+        
+        # Spatial convolution for each time step
         output = []
         for t in range(x_combined.size(1)):
-            x_t = x_combined[:, t, :]  # Get features for current time step
-            # Apply GCN
+            x_t = x_combined[:, t, :]
             out_t = self.spatial_conv(x_t, edge_index, edge_weight)
+            #print(f"After spatial convolution (time {t}): min={out_t.min().item()}, max={out_t.max().item()}, mean={out_t.mean().item()}")
             out_t = self.batch_norm(out_t)
             out_t = F.relu(out_t)
+            out_t = torch.clamp(out_t, min=-100, max=100)
             output.append(out_t)
         
         return output
@@ -168,17 +215,21 @@ class STGCN(nn.Module):
         self.output_layer = nn.Linear(hidden_channels, out_channels)
     
     def forward(self, graph_sequence):
-        """Process a sequence of graphs"""
-        # Extract features, edge_index, and edge_weight from sequence
-        x = [g.x for g in graph_sequence]  # List of node features for each time step
-        edge_index = graph_sequence[0].edge_index  # Same for all time steps
+        # Extract features and structure
+        x = [g.x for g in graph_sequence]
+        edge_index = graph_sequence[0].edge_index
         edge_weight = graph_sequence[0].edge_attr.squeeze()
+
+        print(f"Input to STGCN: min={x[0].min().item()}, max={x[0].max().item()}, mean={x[0].mean().item()}")
         
         # Process through layers
         x = self.input_layer(x, edge_index, edge_weight)
         
-        for layer in self.hidden_layers:
+        #for layer in self.hidden_layers:
+        for layer_idx, layer in enumerate(self.hidden_layers):
             x = layer(x, edge_index, edge_weight)
+            print(f"After layer {layer_idx}: min={x[0].min().item()}, max={x[0].max().item()}, mean={x[0].mean().item()}")
+
         
         # Apply output layer to each time step
         outputs = []
@@ -186,14 +237,16 @@ class STGCN(nn.Module):
             out_t = self.output_layer(x_t)
             outputs.append(out_t)
         
-        # Combine outputs
-        return torch.stack(outputs).mean(dim=0)  # Average across time steps
+        final_output = torch.stack(outputs).mean(dim=0)
+        print(f"Final output: min={final_output.min().item()}, max={final_output.max().item()}, mean={final_output.mean().item()}")
+        
+        return torch.stack(outputs).mean(dim=0)
 
-# Modify training loop
 def train_model(model, train_sequences, train_labels, val_sequences, val_labels, 
                 num_epochs=100, learning_rate=0.001):
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
     criterion = nn.MSELoss()
+    
     
     train_losses = []
     val_losses = []
@@ -208,10 +261,26 @@ def train_model(model, train_sequences, train_labels, val_sequences, val_labels,
             # Forward pass
             output = model(seq)
             target = torch.stack([g.x for g in label]).mean(dim=0)
-            loss = criterion(output, target)
             
-            # Backward pass
+            # Debug prints
+            if epoch % 10 == 0:
+                print(f"Input stats: mean={torch.stack([g.x for g in seq]).mean():.4f}, std={torch.stack([g.x for g in seq]).std():.4f}")
+                print(f"Output stats: mean={output.mean():.4f}, std={output.std():.4f}")
+                print(f"Target stats: mean={target.mean():.4f}, std={target.std():.4f}")
+            
+            # Check for NaN
+            if torch.isnan(output).any() or torch.isnan(target).any():
+                print("NaN values detected in output or target. Skipping this batch.")
+                continue
+            
+            loss = criterion(output, target)
+            if torch.isnan(loss):
+                print(f"NaN loss detected in epoch {epoch}. Skipping this batch.")
+                continue
+
+            # Backward pass with gradient clipping
             loss.backward()
+            #torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
             
             total_loss += loss.item()
@@ -223,7 +292,8 @@ def train_model(model, train_sequences, train_labels, val_sequences, val_labels,
             for seq, label in zip(val_sequences, val_labels):
                 output = model(seq)
                 target = torch.stack([g.x for g in label]).mean(dim=0)
-                val_loss += criterion(output, target).item()
+                if not (torch.isnan(output).any() or torch.isnan(target).any()):
+                    val_loss += criterion(output, target).item()
         
         train_loss = total_loss/len(train_sequences)
         val_loss = val_loss/len(val_sequences)
@@ -234,146 +304,33 @@ def train_model(model, train_sequences, train_labels, val_sequences, val_labels,
         print(f'Epoch {epoch+1}/{num_epochs}')
         print(f'Training Loss: {train_loss:.4f}')
         print(f'Validation Loss: {val_loss:.4f}\n')
+        
+        # Early stopping if loss is NaN
+        if np.isnan(train_loss) or np.isnan(val_loss):
+            print("Training stopped due to NaN loss")
+            break
     
     return train_losses, val_losses
 
-class GraphVisualizer:
-    def __init__(self, dataset):
-        self.dataset = dataset
-        
-    def plot_adjacency_matrix(self):
-        """Visualize HiC interaction matrix"""
-        adj_matrix = self.dataset.create_adjacency_matrix()
-        
-        plt.figure(figsize=(10, 10))
-        # Create mappable object with imshow
-        im = plt.imshow(adj_matrix, cmap='coolwarm')
-        plt.colorbar(im, label='Interaction Strength')
-        plt.title('HiC Interaction Matrix')
-        plt.axis('off')
-        plt.show()
-        
-    def plot_graph_structure(self):
-        """Visualize graph structure"""
-        plt.figure(figsize=(12, 12))
-        
-        # Get position layout
-        pos = nx.spring_layout(self.dataset.G)
-        
-        # Draw nodes
-        nx.draw_networkx_nodes(self.dataset.G, pos, 
-                             node_color='lightblue',
-                             node_size=100)
-        
-        # Draw edges with weights as colors
-        edges = self.dataset.G.edges()
-        weights = [self.dataset.G[u][v]['weight'] for u, v in edges]
-        
-        nx.draw_networkx_edges(self.dataset.G, pos, 
-                             edge_color=weights,
-                             edge_cmap=plt.cm.coolwarm,
-                             width=2, alpha=0.6)
-        
-        plt.title('Graph Structure (Node Connections)')
-        plt.colorbar(plt.cm.ScalarMappable(cmap=plt.cm.coolwarm), 
-                    label='Edge Weight (HiC Interaction)')
-        plt.show()
-        
-    def plot_temporal_patterns(self, num_nodes=5):
-        """Visualize temporal expression patterns"""
-        plt.figure(figsize=(15, 6))
-        
-        # Select random nodes
-        selected_nodes = np.random.choice(self.dataset.num_nodes, num_nodes)
-        
-        # Plot expression over time
-        for node in selected_nodes:
-            expressions = [self.dataset.node_features[t][node, 0].item() 
-                         for t in self.dataset.time_points]
-            plt.plot(self.dataset.time_points, expressions, 
-                    marker='o', label=f'Node {node}')
-        
-        plt.xlabel('Time Points')
-        plt.ylabel('Expression Level')
-        plt.title('Temporal Expression Patterns')
-        plt.legend()
-        plt.grid(True)
-        plt.show()
-        
-    def plot_feature_distributions(self):
-        """Visualize node feature distributions"""
-        # Get features for first time point
-        features = self.dataset.node_features[self.dataset.time_points[0]].numpy()
-        
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        feature_names = ['Expression', 'Compartment', 'TAD Distance', 'Insulation Score']
-        
-        for i, (ax, name) in enumerate(zip(axes.flat, feature_names)):
-            sns.histplot(features[:, i], ax=ax)
-            ax.set_title(f'{name} Distribution')
-            ax.set_xlabel(name)
-        
-        plt.tight_layout()
-        plt.show()
-        
-    def plot_training_progress(self, train_losses, val_losses):
-        """Visualize training progress"""
-        plt.figure(figsize=(10, 6))
-        plt.plot(train_losses, label='Training Loss')
-        plt.plot(val_losses, label='Validation Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Training Progress')
-        plt.legend()
-        plt.grid(True)
-        plt.show()
-        
-    def animate_temporal_graph(self):
-        """Create animation of graph evolution"""
-        fig, ax = plt.subplots(figsize=(10, 10))
-        pos = nx.spring_layout(self.dataset.G)
-        
-        def update(frame):
-            ax.clear()
-            time_point = self.dataset.time_points[frame]
-            features = self.dataset.node_features[time_point].numpy()
-            
-            # Draw nodes with expression as color
-            nx.draw_networkx_nodes(self.dataset.G, pos,
-                                 node_color=features[:, 0],
-                                 cmap='viridis',
-                                 node_size=100)
-            
-            # Draw edges
-            nx.draw_networkx_edges(self.dataset.G, pos,
-                                 alpha=0.2)
-            
-            ax.set_title(f'Time point: {time_point}')
-            
-        anim = FuncAnimation(fig, update, 
-                           frames=len(self.dataset.time_points),
-                           interval=500)
-        plt.close()
-        return anim
-
 if __name__ == "__main__":
-
+    # Load and prepare data
     dataset = TemporalGraphDataset('mapped/enhanced_interactions.csv', seq_len=10, pred_len=1)
-
-    visualizer = GraphVisualizer(dataset)
-    
-    # Plot initial visualizations
-    print("Plotting initial visualizations...")
-    visualizer.plot_adjacency_matrix()
-    visualizer.plot_graph_structure()
-    visualizer.plot_temporal_patterns()
-    visualizer.plot_feature_distributions()
     sequences, labels = dataset.get_temporal_sequences()
+
+    for i, seq in enumerate(sequences):
+        for graph in seq:
+            if torch.isnan(graph.x).any():
+                print(f"NaN found in input node features at sequence {i}")
+            if torch.isinf(graph.x).any():
+                print(f"Inf found in input node features at sequence {i}")
+
+   
     
     # Print dataset information
     print("\nDataset information:")
     print(f"Number of sequences: {len(sequences)}")
     print(f"Sequence length: {len(sequences[0])}")
+    print(f"Number of nodes: {dataset.num_nodes}")
     
     # Print sample graph information
     sample_graph = sequences[0][0]
@@ -389,22 +346,22 @@ if __name__ == "__main__":
     # Create model
     model = STGCN(
         num_nodes=dataset.num_nodes,
-        in_channels=4,  # expression, compartment, TAD, insulation
-        hidden_channels=64,
+        in_channels=4,
+        hidden_channels=32,  # Reduced from 64 to 32 for stability
         out_channels=4,
         num_layers=3
     )
-
-    #train_model(model, train_seq, train_labels, val_seq, val_labels)
-
-    train_losses, val_losses = train_model(model, train_seq, train_labels, 
-                                         val_seq, val_labels)
+    
+    # Train model
+    train_losses, val_losses = train_model(model, train_seq, train_labels, val_seq, val_labels)
     
     # Plot training progress
-    visualizer.plot_training_progress(train_losses, val_losses)
-    
-    # Create temporal animation
-    anim = visualizer.animate_temporal_graph()
-    
-    # Save animation
-    anim.save('temporal_evolution.gif', writer='pillow')
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training Progress')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
