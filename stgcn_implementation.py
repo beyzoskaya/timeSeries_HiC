@@ -46,18 +46,18 @@ class TemporalGraphDataset:
                                                       self.df['HiC_Interaction'].values]))
         self.edge_weight = (self.edge_weight - self.edge_weight.mean()) / self.edge_weight.std()
 
-        print("Initial data shape:", self.df.shape)
-        print("\nSample of time columns:", self.time_cols[:5])
-        print("\nSample of unique genes:", list(self.node_map.keys())[:5])
-        print("\nEdge index shape:", self.edge_index.shape)
-        print("Edge weight shape:", self.edge_weight.shape)
+        print("Initial data shape:", self.df.shape) # --> (190,103) --> 190 rows and 103 columns for the mESC speciey
+        print("\nSample of time columns:", self.time_cols[:5]) # --> ['Gene1_Time_-4.5', 'Gene2_Time_-4.5', 'Gene1_Time_0.5', 'Gene2_Time_0.5', 'Gene1_Time_1.0'] from -4.5 to 28 
+        print("\nSample of unique genes:", list(self.node_map.keys())[:5]) # --> ['ABCA3', 'ABCD1', 'ABCG2', 'ADAMTSL2', 'AGER'] different genes in the data
+        print("\nEdge index shape:", self.edge_index.shape) # --> [2,380]
+        print("Edge weight shape:", self.edge_weight.shape) # --> [380] --> weight dim as feature dim  
         
         self.process_node_features()
     
     def process_node_features(self):
 
         print("\nProcessing node features...")
-        print("Number of nodes:", len(self.node_map))
+        print("Number of nodes:", len(self.node_map)) # --> 52 nodes in the graph
 
         self.node_features = {}
 
@@ -65,11 +65,11 @@ class TemporalGraphDataset:
             features = []
             for gene in self.node_map.keys():
                 gene_data = self.df[(self.df['Gene1'] == gene) | (self.df['Gene2'] == gene)].iloc[0]
-                print(f"\nFeatures for gene {gene}:")
-                print(f"Expression: {gene_data[f'Gene1_Time_{t}']}")
-                print(f"Compartment: {gene_data['Gene1_Compartment']}")
-                print(f"TAD: {gene_data['Gene1_TAD_Boundary_Distance']}")
-                print(f"Insulation: {gene_data['Gene1_Insulation_Score']}")
+                #print(f"\nFeatures for gene {gene}:")
+                #print(f"Expression: {gene_data[f'Gene1_Time_{t}']}")
+                #print(f"Compartment: {gene_data['Gene1_Compartment']}")
+                #print(f"TAD: {gene_data['Gene1_TAD_Boundary_Distance']}")
+                #print(f"Insulation: {gene_data['Gene1_Insulation_Score']}")
 
                 expr = gene_data[f'Gene1_Time_{t}'] if gene == gene_data['Gene1'] else gene_data[f'Gene2_Time_{t}']
 
@@ -223,11 +223,78 @@ def visualize_and_analyze_data(dataset):
     plt.ylabel('Count')
     plt.show()
 
+def visualize_and_analyze_data_2(dataset):
+    # check data before creating graph
+    print("\nChecking edge data:")
+    print("Edge index range:", dataset.edge_index.min().item(), "to", dataset.edge_index.max().item()) # --> 0 to 51
+    print("Edge weight range:", dataset.edge_weight.min().item(), "to", dataset.edge_weight.max().item()) # --> -0.7034335319939353 to 3.024528169661339 normalized edge weights
+
+    # check node features before plotting
+    first_time = dataset.time_points[0]
+    features = dataset.node_features[first_time]
+    print("\nNode features shape:", features.shape)
+    print("Feature values range:", features.min().item(), "to", features.max().item())
+
+    # Plot only if we have data
+    if len(dataset.edge_index[0]) > 0:
+        # Graph visualization
+        G = nx.Graph()
+        edge_index = dataset.edge_index.numpy()
+        edge_weight = dataset.edge_weight.numpy()
+        
+        for i in range(len(edge_index[0])):
+            G.add_edge(edge_index[0][i], edge_index[1][i], weight=edge_weight[i])
+        
+        plt.figure(figsize=(10, 10))
+        # For large graphs, limit number of nodes to plot
+        if G.number_of_nodes() > 100:
+            G = nx.subgraph(G, list(G.nodes())[:100])
+        pos = nx.spring_layout(G)
+        nx.draw(G, pos, node_size=50, with_labels=False, edge_color='gray', alpha=0.5)
+        plt.title(f"Graph Structure (showing up to 100 nodes)")
+        plt.show()
+        #plt.savefig('plottings/stgcn_graph.png')
+
+    # Plot feature distributions if we have features
+    if len(features) > 0:
+        plt.figure(figsize=(15, 5))
+        feature_names = ['Expression', 'Compartment', 'TAD_Distance', 'Insulation']
+        for i, name in enumerate(feature_names):
+            plt.subplot(1, 4, i+1)
+            feature_vals = features[:, i].numpy()
+            plt.hist(feature_vals, bins=30)
+            plt.title(f'{name} Distribution')
+        plt.tight_layout()
+        plt.show()
+        #plt.savefig('plottings/feature_distributions.png')
+
+    # Plot temporal patterns if we have multiple time points
+    if len(dataset.time_points) > 1:
+        plt.figure(figsize=(12, 6))
+        num_nodes_to_plot = min(5, dataset.num_nodes)
+        sample_nodes = np.random.choice(dataset.num_nodes, num_nodes_to_plot, replace=False)
+        
+        for node in sample_nodes:
+            expressions = []
+            for t in dataset.time_points:
+                if t in dataset.node_features:
+                    expressions.append(dataset.node_features[t][node, 0].item())
+            if expressions:
+                plt.plot(dataset.time_points[:len(expressions)], expressions, label=f'Node {node}')
+        
+        plt.xlabel('Time')
+        plt.ylabel('Expression')
+        plt.title('Temporal Expression Patterns')
+        plt.legend()
+        plt.show()
+        #plt.savefig('plottings/temp_patterns.png')
+
 
 if __name__ == "__main__":
     dataset = TemporalGraphDataset('mapped/enhanced_interactions.csv', seq_len=10, pred_len=1)
     
-    visualize_and_analyze_data(dataset)
+    #visualize_and_analyze_data(dataset)
+    visualize_and_analyze_data_2(dataset)
     
     model = STGCN(
         num_nodes=dataset.num_nodes,
@@ -240,4 +307,4 @@ if __name__ == "__main__":
     print(model)
     
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"\nTotal number of parameters: {total_params}")
+    print(f"\nTotal number of parameters: {total_params}") # --> Total number of parameters: 22020
