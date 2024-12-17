@@ -57,13 +57,13 @@ class TemporalGraphDataset:
             edge_weights.append(d['weight'])
         
         edge_index = torch.tensor(edge_index).t().contiguous()
-        print(f"edge index: {edge_index}")
+        #print(f"edge index: {edge_index}") --> not nan
         edge_weights = torch.tensor(edge_weights, dtype=torch.float)
-        print(f"edge weights: {edge_weights}")
+        #print(f"edge weights: {edge_weights}") --> not nan
         
         # Normalize edge weights
         edge_weights = (edge_weights - edge_weights.mean()) / (edge_weights.std() + 1e-6)
-        print(f"Normalized edge weights: {edge_weights}")
+        #print(f"Normalized edge weights: {edge_weights}") --> not nan
         
         self.edge_index = edge_index
         self.edge_attr = edge_weights.unsqueeze(1)
@@ -161,11 +161,16 @@ class TemporalGraphDataset:
 
 class STGCNLayer(nn.Module):
     def __init__(self, in_channels, out_channels):
+        """
+        get sequence of node (genes from all chromosomes) features
+        apply temporal conv to capture patterns over time
+        apply graph conv to capture spatial relations
+        """
         super(STGCNLayer, self).__init__()
-        self.temporal_conv = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.spatial_conv = GCNConv(out_channels, out_channels)
-        self.batch_norm = nn.BatchNorm1d(out_channels)
-        self.layer_norm = nn.LayerNorm(out_channels)
+        self.temporal_conv = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1) # process time dimension
+        self.spatial_conv = GCNConv(out_channels, out_channels) # process graph structure
+        self.batch_norm = nn.BatchNorm1d(out_channels) # normalization 
+        self.layer_norm = nn.LayerNorm(out_channels) # normalization
         
     def forward(self, x, edge_index, edge_weight):
         # Add small epsilon to avoid division by zero
@@ -199,9 +204,14 @@ class STGCNLayer(nn.Module):
             output.append(out_t)
         
         return output
+    
 
 class STGCN(nn.Module):
     def __init__(self, num_nodes, in_channels, hidden_channels, out_channels, num_layers=3):
+        """
+        input as sequence of graphs (10 time points because sequence lenght is 10)
+        
+        """
         super(STGCN, self).__init__()
         
         self.num_layers = num_layers
@@ -241,6 +251,9 @@ class STGCN(nn.Module):
         print(f"Final output: min={final_output.min().item()}, max={final_output.max().item()}, mean={final_output.mean().item()}")
         
         return torch.stack(outputs).mean(dim=0)
+    
+    
+
 
 def train_model(model, train_sequences, train_labels, val_sequences, val_labels, 
                 num_epochs=100, learning_rate=0.001):
