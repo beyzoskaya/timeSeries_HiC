@@ -9,6 +9,7 @@ import networkx as nx
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
+import os
 import seaborn as sns
 
 class TemporalGraphDataset:
@@ -276,14 +277,150 @@ class STGCN(nn.Module):
         
         return torch.stack(outputs).mean(dim=0)
     
+def evaluate_performance(model, test_sequences, test_labels):
+    model.eval()
+    all_predictions = []
+    all_targets = []
+    metrics = {}
     
+    with torch.no_grad():
+        for seq, label in zip(test_sequences, test_labels):
+            # Get predictions
+            pred = model(seq)
+            target = torch.stack([g.x for g in label]).mean(dim=0)
+            
+            all_predictions.append(pred)
+            all_targets.append(target)
+        
+        # Convert to tensors
+        predictions = torch.stack(all_predictions)
+        targets = torch.stack(all_targets)
+        
+        # Calculate metrics
+        mse = F.mse_loss(predictions, targets).item()
+        mae = F.l1_loss(predictions, targets).item()
+        
+        # Calculate correlation per feature
+        correlations = []
+        for i in range(predictions.shape[-1]):
+            corr = np.corrcoef(predictions[..., i].numpy().flatten(), 
+                             targets[..., i].numpy().flatten())[0,1]
+            correlations.append(corr)
+        
+        metrics['MSE'] = mse
+        metrics['MAE'] = mae
+        metrics['Correlations'] = correlations
+        
+    return metrics, predictions, targets   
+
+def visualize_predictions(predictions, targets, feature_idx=0):
+    """
+    Visualize predictions vs actual values for a specific feature
+    """
+    plt.figure(figsize=(10, 6))
+    plt.scatter(targets[..., feature_idx].numpy(), 
+               predictions[..., feature_idx].numpy(), 
+               alpha=0.5)
+    plt.plot([targets[..., feature_idx].min(), targets[..., feature_idx].max()], 
+             [targets[..., feature_idx].min(), targets[..., feature_idx].max()], 
+             'r--')
+    plt.xlabel('Actual Values')
+    plt.ylabel('Predicted Values')
+    plt.title(f'Predictions vs Actual Values for Feature {feature_idx}')
+    #plt.show()
+    plt.savefig('plottings/pred_vs_actual_base_model.png')
+
+def plot_time_series_prediction(predictions, targets, sequence_idx=0, feature_idx=0):
+    """
+    Plot time series of predictions vs actual values
+    """
+    plt.figure(figsize=(12, 6))
+    plt.plot(targets[sequence_idx, :, feature_idx].numpy(), 
+             label='Actual', marker='o')
+    plt.plot(predictions[sequence_idx, :, feature_idx].numpy(), 
+             label='Predicted', marker='o')
+    plt.xlabel('Time Steps')
+    plt.ylabel('Value')
+    plt.title(f'Time Series Prediction vs Actual (Feature {feature_idx})')
+    plt.legend()
+    #plt.show()
+    plt.savefig('plottings/time_series_predictions_vs_actual.png')
+
+def evaluate_performance_save_plots(model, test_sequences, test_labels, epoch=None, save_dir='plottings'):
+
+    model.eval()
+    all_predictions = []
+    all_targets = []
+    metrics = {}
+    
+    with torch.no_grad():
+        for seq, label in zip(test_sequences, test_labels):
+            pred = model(seq)
+            target = torch.stack([g.x for g in label]).mean(dim=0)
+            all_predictions.append(pred)
+            all_targets.append(target)
+        
+        predictions = torch.stack(all_predictions)
+        targets = torch.stack(all_targets)
+        
+        # Calculate metrics
+        mse = F.mse_loss(predictions, targets).item()
+        mae = F.l1_loss(predictions, targets).item()
+        
+        correlations = []
+        for i in range(predictions.shape[-1]):
+            corr = np.corrcoef(predictions[..., i].numpy().flatten(), 
+                             targets[..., i].numpy().flatten())[0,1]
+            correlations.append(corr)
+        
+        metrics['MSE'] = mse
+        metrics['MAE'] = mae
+        metrics['Correlations'] = correlations
+
+        # Save visualizations if epoch is provided
+        if epoch is not None and epoch % 10 == 0:
+            # Create directory if it doesn't exist
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Save predictions vs actual plot for each feature
+            for feature_idx in range(predictions.shape[-1]):
+                plt.figure(figsize=(10, 6))
+                plt.scatter(targets[..., feature_idx].numpy(), 
+                          predictions[..., feature_idx].numpy(), 
+                          alpha=0.5)
+                plt.plot([targets[..., feature_idx].min(), targets[..., feature_idx].max()], 
+                        [targets[..., feature_idx].min(), targets[..., feature_idx].max()], 
+                        'r--')
+                plt.xlabel('Actual Values')
+                plt.ylabel('Predicted Values')
+                plt.title(f'Feature {feature_idx} Predictions (Epoch {epoch})')
+                plt.savefig(f'{save_dir}/pred_vs_actual_feature{feature_idx}_epoch{epoch}.png')
+                plt.close()
+
+            # Save time series plot
+            plt.figure(figsize=(12, 6))
+            for feature_idx in range(predictions.shape[-1]):
+                plt.subplot(2, 2, feature_idx + 1)
+                plt.plot(targets[0, :, feature_idx].numpy(), 
+                        label='Actual', marker='o')
+                plt.plot(predictions[0, :, feature_idx].numpy(), 
+                        label='Predicted', marker='o')
+                plt.title(f'Feature {feature_idx}')
+                plt.legend()
+            plt.tight_layout()
+            plt.savefig(f'{save_dir}/time_series_epoch{epoch}.png')
+            plt.close()
+
+    return metrics, predictions, targets
+
 
 
 def train_model(model, train_sequences, train_labels, val_sequences, val_labels, 
                 num_epochs=100, learning_rate=0.001):
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
     criterion = nn.MSELoss()
-    
+
+    os.makedirs('plottings_training_validation', exist_ok=True)
     
     train_losses = []
     val_losses = []
@@ -301,9 +438,16 @@ def train_model(model, train_sequences, train_labels, val_sequences, val_labels,
             
             # Debug prints
             if epoch % 10 == 0:
-                print(f"Input stats: mean={torch.stack([g.x for g in seq]).mean():.4f}, std={torch.stack([g.x for g in seq]).std():.4f}")
-                print(f"Output stats: mean={output.mean():.4f}, std={output.std():.4f}")
-                print(f"Target stats: mean={target.mean():.4f}, std={target.std():.4f}")
+                metrics, _ , _ = evaluate_performance_save_plots(model, val_sequences, val_labels, 
+                                              epoch=epoch, save_dir='plottings')
+                print("\nValidation Metrics:")
+                print(f"MSE: {metrics['MSE']:.4f}")
+                print(f"MAE: {metrics['MAE']:.4f}")
+                print("Feature Correlations:", 
+                    [f"{corr:.4f}" for corr in metrics['Correlations']])
+                #print(f"Input stats: mean={torch.stack([g.x for g in seq]).mean():.4f}, std={torch.stack([g.x for g in seq]).std():.4f}")
+                #print(f"Output stats: mean={output.mean():.4f}, std={output.std():.4f}")
+                #print(f"Target stats: mean={target.mean():.4f}, std={target.std():.4f}")
             
             # Check for NaN
             if torch.isnan(output).any() or torch.isnan(target).any():
@@ -401,4 +545,5 @@ if __name__ == "__main__":
     plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.show()
+    #plt.show()
+    plt.savefig('plottings/train_val_loss_base_model.png')
