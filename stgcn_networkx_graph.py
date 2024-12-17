@@ -146,19 +146,32 @@ class TemporalGraphDataset:
         )
     
     def get_temporal_sequences(self):
+        """Debug temporal sequence creation"""
         sequences = []
         labels = []
         
         for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
+            # Print time points being used
+            print(f"\nSequence {i}:")
+            print(f"Input times: {self.time_points[i:i+self.seq_len]}")
+            print(f"Target times: {self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]}")
+            
             seq_graphs = [self.create_graph(t) for t in self.time_points[i:i+self.seq_len]]
             label_graphs = [self.create_graph(t) for t in 
-                          self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]]
+                        self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]]
+            
+            # Check graph structures
+            print("\nInput graphs:")
+            for j, g in enumerate(seq_graphs):
+                print(f"Time {j}: nodes={g.x.shape}, edges={g.edge_index.shape}")
             
             sequences.append(seq_graphs)
             labels.append(label_graphs)
         
         return sequences, labels
+        
 
+       
 class STGCNLayer(nn.Module):
     def __init__(self, in_channels, out_channels):
         """
@@ -167,40 +180,48 @@ class STGCNLayer(nn.Module):
         apply graph conv to capture spatial relations
         """
         super(STGCNLayer, self).__init__()
-        self.temporal_conv = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1) # process time dimension
-        self.spatial_conv = GCNConv(out_channels, out_channels) # process graph structure
-        self.batch_norm = nn.BatchNorm1d(out_channels) # normalization 
-        self.layer_norm = nn.LayerNorm(out_channels) # normalization
+        self.temporal_conv = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.spatial_conv = GCNConv(out_channels, out_channels)
+        self.batch_norm = nn.BatchNorm1d(out_channels)
         
     def forward(self, x, edge_index, edge_weight):
-        # Add small epsilon to avoid division by zero
-        edge_weight = edge_weight + 1e-6
+        # Check input sequence
+        print("Input sequence shapes:")
+        for i, x_t in enumerate(x):
+            print(f"Time step {i}: {x_t.shape}")
         
-        # Stack and normalize input
-        x_combined = torch.stack(x)
-        x_combined = torch.clamp(x_combined, min=-100, max=100)
-        #print(f"Before temporal convolution: min={x_combined.min().item()}, max={x_combined.max().item()}, mean={x_combined.mean().item()}")
-
+        # Stack temporal sequence
+        x_combined = torch.stack(x)  # [seq_len, num_nodes, features]
+        print(f"After stacking: {x_combined.shape}")
+        
+        # Check for valid values
+        print(f"Stacked values - min: {x_combined.min()}, max: {x_combined.max()}")
         
         # Temporal convolution
-        x_combined = x_combined.permute(1, 2, 0)
+        x_combined = x_combined.permute(1, 2, 0)  # [num_nodes, features, seq_len]
+        print(f"Before temporal conv: {x_combined.shape}")
+        
         x_combined = self.temporal_conv(x_combined)
-        x_combined = x_combined.permute(0, 2, 1)
+        print(f"After temporal conv: {x_combined.shape}")
         
-        #print(f"After temporal convolution: min={x_combined.min().item()}, max={x_combined.max().item()}, mean={x_combined.mean().item()}")
+        x_combined = x_combined.permute(0, 2, 1)  # [num_nodes, seq_len, features]
+        print(f"After permute: {x_combined.shape}")
         
-        # Layer normalization
-        x_combined = self.layer_norm(x_combined)
-        
-        # Spatial convolution for each time step
+        # Process each time step
         output = []
         for t in range(x_combined.size(1)):
             x_t = x_combined[:, t, :]
+            # Check graph structure
+            print(f"\nTime step {t}:")
+            print(f"Node features: {x_t.shape}")
+            print(f"Edge index: {edge_index.shape}")
+            print(f"Edge weights: {edge_weight.shape}")
+            
             out_t = self.spatial_conv(x_t, edge_index, edge_weight)
-            #print(f"After spatial convolution (time {t}): min={out_t.min().item()}, max={out_t.max().item()}, mean={out_t.mean().item()}")
+            print(f"After GCN: {out_t.shape}")
+            
             out_t = self.batch_norm(out_t)
             out_t = F.relu(out_t)
-            out_t = torch.clamp(out_t, min=-100, max=100)
             output.append(out_t)
         
         return output
@@ -210,7 +231,7 @@ class STGCN(nn.Module):
     def __init__(self, num_nodes, in_channels, hidden_channels, out_channels, num_layers=3):
         """
         input as sequence of graphs (10 time points because sequence lenght is 10)
-        
+
         """
         super(STGCN, self).__init__()
         
