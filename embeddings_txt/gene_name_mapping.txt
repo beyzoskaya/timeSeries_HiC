@@ -1,0 +1,53 @@
+original_name	clean_name
+ABCA3	ABCA3
+ABCD1	ABCD1
+ABCG2	ABCG2
+ADAMTSL2	ADAMTSL2
+AGER	AGER
+ALDH1A1 (PMID 11751205)	ALDH1A1
+AMACR	AMACR
+CD38	CD38
+Claudin 1	Claudin
+Claudin5	Claudin5
+Dnmt3a	Dnmt3a
+E2F8	E2F8
+EGFR (Epidermal growth factor receptor) (PMID 22916088 22245996)	EGFR
+EPHA7	EPHA7
+F13A1	F13A1
+FGF18	FGF18
+FOXF2	FOXF2
+FSP1 (S100a4)	FSP1
+GATA-6	GATA-6
+GUCY1A2  sGC(soluble guanylate cyclase) (PMID 23934926)	GUCY1A2
+Hist1h1b	Hist1h1b
+Hist1h2ab	Hist1h2ab
+hmbs	hmbs
+HPGDS	HPGDS
+hprt	hprt
+Igfbp3	Igfbp3
+INMT	INMT
+integrin subunit alpha 8	integrin
+Kcnma1	Kcnma1
+Lrp2	Lrp2
+MCPt4	MCPt4
+MGAT4A	MGAT4A
+MMP-3	MMP-3
+MMP7	MMP7
+N-Cadherin(CDH2)	N-Cadherin
+NME3	NME3
+P-63	P-63
+ppia	ppia
+PRIM2	PRIM2
+RAGE	RAGE
+SFTP-D	SFTP-D
+Shisa3	Shisa3
+tbp	tbp
+tfrc	tfrc
+TGFB1	TGFB1
+THTPA	THTPA
+Thy1	Thy1
+Tnc	Tnc
+TTF-1	TTF-1
+Vegf	Vegf
+VIM	VIM
+ywhaz	ywhaz

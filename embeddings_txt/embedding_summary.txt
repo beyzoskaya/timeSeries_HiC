@@ -1,0 +1,4 @@
+Embedding Information:
+Number of time points: 43
+Number of genes: 52
+Embedding dimension: 128
