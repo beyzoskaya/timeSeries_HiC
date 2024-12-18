@@ -7,6 +7,15 @@ from sklearn.preprocessing import StandardScaler
 import pickle
 import os
 
+
+def clean_gene_name(gene_name):
+    if pd.isna(gene_name):
+        return gene_name
+    clean_name = gene_name.split('(')[0].strip()
+    clean_name = clean_name.split(' ')[0].strip()
+    print(f"Cleaned name: {clean_name}")
+    return clean_name
+
 class TemporalNode2VecWrapper:
     def __init__(self, dimensions=128, walk_length=80, num_walks=10, workers=4):
         self.dimensions = dimensions
@@ -20,11 +29,14 @@ class TemporalNode2VecWrapper:
         
         # Add all genes as nodes
         genes = pd.concat([df['Gene1'], df['Gene2']]).unique()
-        G.add_nodes_from(genes)
-        
+        clean_genes = [clean_gene_name(gene) for gene in genes]
+        G.add_nodes_from(clean_genes) # create graph with cleaned gene names because some of them have explanation for the gene
+      
         # Add edges with weights
         for _, row in df.iterrows():
-            # Calculate edge weight combining all features
+            gene1 = clean_gene_name(row['Gene1'])
+            gene2 = clean_gene_name(row['Gene2'])
+            
             hic_weight = row['HiC_Interaction']
             compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
             tad_dist = abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance'])
@@ -39,7 +51,7 @@ class TemporalNode2VecWrapper:
                      ins_sim * 0.15 + 
                      expr_sim * 0.15)
             
-            G.add_edge(row['Gene1'], row['Gene2'], weight=weight)
+            G.add_edge(gene1, gene2, weight=weight)
         
         return G
     
@@ -160,10 +172,22 @@ class TemporalNode2VecWrapper:
 def create_and_save_features(df, output_dir='embeddings_txt'):
     os.makedirs(output_dir, exist_ok=True)
 
+    df = df.copy()
+    df['Gene1_clean'] = df['Gene1'].apply(clean_gene_name)
+    df['Gene2_clean'] = df['Gene2'].apply(clean_gene_name)
+
     temporal_n2v = TemporalNode2VecWrapper()
    
     print("Creating temporal embeddings...")
     temporal_embeddings = temporal_n2v.create_temporal_embeddings(df)
+    
+    # Save gene name mapping
+    gene_mapping = pd.DataFrame({
+        'original_name': pd.concat([df['Gene1'], df['Gene2']]).unique(),
+        'clean_name': pd.concat([df['Gene1_clean'], df['Gene2_clean']]).unique()
+    }).drop_duplicates()
+    gene_mapping.to_csv(os.path.join(output_dir, 'gene_name_mapping.txt'), 
+                       index=False, sep='\t')
     
     with open(os.path.join(output_dir, 'embedding_summary.txt'), 'w') as f:
         sample_time = list(temporal_embeddings.keys())[0]
@@ -186,7 +210,8 @@ def create_and_save_features(df, output_dir='embeddings_txt'):
                 else:
                     print(f"Warning: Skipping invalid embedding for gene {gene}")
     
-    unique_genes = pd.concat([df['Gene1'], df['Gene2']]).unique()
+    # Save node mapping with clean names
+    unique_genes = pd.concat([df['Gene1_clean'], df['Gene2_clean']]).unique()
     node_map = {gene: idx for idx, gene in enumerate(unique_genes)}
     
     with open(os.path.join(output_dir, 'node_map.txt'), 'w') as f:
