@@ -130,8 +130,8 @@ class STGCN(nn.Module):
         return torch.stack([self.output_layer(x_t) for x_t in x]).mean(dim=0)
 
 
-def train_model(model, train_sequences, train_labels, val_sequences, val_labels, num_epochs=100, learning_rate=0.0001):
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+def train_model(model, train_sequences, train_labels, val_sequences, val_labels, num_epochs=50, learning_rate=0.0001):
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,  weight_decay=1e-5)
     criterion = nn.MSELoss()
 
     train_losses = []
@@ -296,7 +296,7 @@ if __name__ == "__main__":
     model = STGCN(
         num_nodes=len(node_map),
         in_channels=128,
-        hidden_channels=64,
+        hidden_channels=32,
         out_channels=128,
         num_layers=3
     )
