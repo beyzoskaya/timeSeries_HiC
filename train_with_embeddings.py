@@ -21,131 +21,128 @@ class TemporalGraphDataset:
         self.process_data()
     
     def process_data(self):
+        # Get time points
         self.time_cols = [col for col in self.df.columns if 'Time_' in col]
         self.time_points = sorted(list(set([float(col.split('_')[-1]) 
                                           for col in self.time_cols if 'Gene1' in col])))
+        print(f"Found {len(self.time_points)} time points")
+        
+        # Create node mapping
         unique_genes = pd.concat([self.df['Gene1'], self.df['Gene2']]).unique()
         self.node_map = {gene: idx for idx, gene in enumerate(unique_genes)}
         self.num_nodes = len(self.node_map)
         print(f"Number of nodes: {self.num_nodes}")
-
-        self.G = self.create_graph_structure()
-        self.process_node_features()
-    
-    def create_adjacency_matrix(self):
-        adj_matrix = np.zeros((self.num_nodes, self.num_nodes)) # symmetric matrix
-        for _, row in self.df.iterrows():
-            i = self.node_map[row['Gene1']] 
-            j = self.node_map[row['Gene2']]
-            adj_matrix[i,j] = row['HiC_Interaction']
-            adj_matrix[j,i] = row['HiC_Interaction']
-        return adj_matrix
+        
+        # Create graph structure ONCE using HiC data
+        self.create_graph_structure()
+        
+        # Load embeddings as node features
+        self.load_node_embeddings()
     
     def create_graph_structure(self):
-        adj_matrix = self.create_adjacency_matrix()
-        G = nx.from_numpy_array(adj_matrix)
-
+        """Create graph structure using HiC interactions"""
+        # Create adjacency matrix from HiC data
+        adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
+        for _, row in self.df.iterrows():
+            i = self.node_map[row['Gene1']]
+            j = self.node_map[row['Gene2']]
+            adj_matrix[i, j] = row['HiC_Interaction']
+            adj_matrix[j, i] = row['HiC_Interaction']
+        
+        # Create edge index and weights
         edge_index = []
         edge_weights = []
-
-        for u,v,d in G.edges(data=True):
-            edge_index.append([u,v])
-            edge_weights.append(d['weight'])
+        for i in range(self.num_nodes):
+            for j in range(i+1, self.num_nodes):
+                if adj_matrix[i, j] > 0:
+                    edge_index.extend([[i, j], [j, i]])
+                    edge_weights.extend([adj_matrix[i, j], adj_matrix[i, j]])
         
-        edge_index = torch.tensor(edge_index).t().contiguous()
+        self.edge_index = torch.tensor(edge_index).t().contiguous()
         edge_weights = torch.tensor(edge_weights, dtype=torch.float)
-        edge_weights = (edge_weights - edge_weights.mean()) / (edge_weights.std() + 1e-6)
-
-        self.edge_index = edge_index
+        
+        # Normalize edge weights with min-max normalization
+        edge_weights = (edge_weights - edge_weights.min()) / (edge_weights.max() - edge_weights.min() + 1e-6)
         self.edge_attr = edge_weights.unsqueeze(1)
-
-        return G
+        
+        print(f"Graph structure created: {len(edge_weights)} edges")
     
-    def process_node_features(self):
+    def load_node_embeddings(self):
+        """Load pre-computed node2vec embeddings"""
         self.node_features = {}
         scaler = StandardScaler()
-
+        
         for t in self.time_points:
-            embeddings = {}
+            # Load embeddings for this time point
             embedding_file = os.path.join(self.embedding_dir, f'embeddings_time_{t}.txt')
             if not os.path.exists(embedding_file):
                 raise FileNotFoundError(f"No embedding file found for time {t}")
-
+            
+            # Read embeddings
+            embeddings = {}
             with open(embedding_file, 'r') as f:
                 for line in f:
-                    if line.startswith('#'): # handle comment line for the files
+                    if line.startswith('#'):
                         continue
                     parts = line.strip().split()
                     gene = parts[0]
                     embedding = np.array([float(x) for x in parts[1:]])
                     embeddings[gene] = embedding
             
+            # Create feature matrix
             features = []
             for gene in self.node_map.keys():
-                if gene not in embeddings:
-                    print(f"Warning: No embedding found for gene {gene} at time {t}")
-                    embedding = np.zeros(128)
+                if gene in embeddings:
+                    features.append(embeddings[gene])
                 else:
-                    embedding = embeddings[gene]
-                features.append(embedding)
+                    print(f"Warning: No embedding for gene {gene} at time {t}")
+                    features.append(np.zeros(128))  # Default embedding size
             
             features = np.array(features)
+            
+            # Normalize features
             if t == self.time_points[0]:
                 scaler.fit(features)
             features_normalized = scaler.transform(features)
-
+            
             self.node_features[t] = torch.tensor(features_normalized, dtype=torch.float)
-
+    
     def create_graph(self, time_point):
+        """Create graph with embeddings as node features"""
         return Data(
             x=self.node_features[time_point],
             edge_index=self.edge_index,
             edge_attr=self.edge_attr,
             num_nodes=self.num_nodes
         )
-    
     def get_temporal_sequences(self):
-        """Create temporal sequences for training"""
+        """Create sequences of temporal graphs for training"""
         sequences = []
         labels = []
         
-        try:
-            for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
-                # Get sequence of graphs
-                seq_graphs = [self.create_graph(t) for t in self.time_points[i:i+self.seq_len]]
-                label_graphs = [self.create_graph(t) for t in 
-                            self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]]
-                
-                # Debug print
-                print(f"\nSequence {i}:")
-                print(f"Input times: {self.time_points[i:i+self.seq_len]}")
-                print(f"Target times: {self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]}")
-                
-                # Check for valid graphs
-                if all(g is not None for g in seq_graphs) and all(g is not None for g in label_graphs):
-                    sequences.append(seq_graphs)
-                    labels.append(label_graphs)
-                else:
-                    print(f"Warning: Skipping sequence {i} due to invalid graphs")
-                    
-            if not sequences:
-                raise ValueError("No valid sequences created")
-                
-            print(f"\nCreated {len(sequences)} sequences")
-            print(f"Each sequence has {len(sequences[0])} time points")
-            print(f"Feature dimension: {sequences[0][0].x.shape[1]}")
+        # Create sequences
+        for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
+            # Input sequence
+            seq_graphs = [self.create_graph(t) for t in self.time_points[i:i+self.seq_len]]
             
-            return sequences, labels
+            # Target sequence
+            label_graphs = [self.create_graph(t) for t in 
+                        self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]]
             
-        except Exception as e:
-            print(f"Error in get_temporal_sequences: {str(e)}")
-            print("Checking data:")
-            print(f"Time points: {self.time_points}")
-            print(f"Sequence length: {self.seq_len}")
-            print(f"Prediction length: {self.pred_len}")
-            if hasattr(self, 'node_features'):
-                print(f"Node features available for times: {list(self.node_features.keys())}")
-            raise
+            sequences.append(seq_graphs)
+            labels.append(label_graphs)
+            
+            # Debug info
+            if i == 0:  # Print info for first sequence only
+                print(f"\nExample sequence:")
+                print(f"Input time points: {self.time_points[i:i+self.seq_len]}")
+                print(f"Target time points: {self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]}")
+                print(f"Feature dimension: {seq_graphs[0].x.shape[1]}")
+        
+        print(f"\nCreated {len(sequences)} sequences")
+        print(f"Each sequence has {len(sequences[0])} time points")
+        
+        return sequences, labels
                 
 class STGCNLayer(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -211,11 +208,11 @@ class STGCN(nn.Module):
     
 
 
-def train_model(model, train_sequences, train_labels, val_sequences, val_labels, num_epochs=100, learning_rate=0.0001):
+def train_model(model, train_sequences, train_labels, val_sequences, val_labels, num_epochs=100, learning_rate=0.0005):
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
 
-    os.makedirs('plottings_embedding', exist_ok=True)
+    os.makedirs('plottings_embedding_combined', exist_ok=True)
     
     train_losses = []
     val_losses = []
@@ -277,7 +274,7 @@ def train_model(model, train_sequences, train_labels, val_sequences, val_labels,
     
     return train_losses, val_losses
 
-def visualize_predictions_detailed(model, test_sequences, test_labels, save_dir='plottings_embedding'):
+def visualize_predictions_detailed(model, test_sequences, test_labels, save_dir='plottings_embedding_combined'):
 
     model.eval()
     os.makedirs(save_dir, exist_ok=True)
@@ -389,7 +386,7 @@ if __name__ == "__main__":
     dataset = TemporalGraphDataset(
         csv_file='mapped/enhanced_interactions.csv',
         embedding_dir='embeddings_txt',
-        seq_len=10,
+        seq_len=10, 
         pred_len=1
     )
 
@@ -409,14 +406,12 @@ if __name__ == "__main__":
         num_nodes=dataset.num_nodes,
         in_channels=128,  # Node2Vec embedding dimension
         hidden_channels=64,
-        out_channels=128,  # Same as input for prediction
+        out_channels=128,
         num_layers=3
     )
-
+    
     train_losses, val_losses = train_model(
-        model, train_seq, train_labels, val_seq, val_labels,
-        num_epochs=100,
-        learning_rate=0.001
+        model, train_seq, train_labels, val_seq, val_labels
     )
 
     print("\nCreating prediction visualizations...")
@@ -437,4 +432,4 @@ if __name__ == "__main__":
     plt.title('Training Progress with Node2Vec Embeddings')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_embedding/final_training_progress.png')
+    plt.savefig('plottings_embedding_combined/final_training_progress.png')
