@@ -21,27 +21,21 @@ class TemporalGraphDataset:
         self.process_data()
     
     def process_data(self):
-        # Get time points
         self.time_cols = [col for col in self.df.columns if 'Time_' in col]
         self.time_points = sorted(list(set([float(col.split('_')[-1]) 
                                           for col in self.time_cols if 'Gene1' in col])))
         print(f"Found {len(self.time_points)} time points")
         
-        # Create node mapping
         unique_genes = pd.concat([self.df['Gene1'], self.df['Gene2']]).unique()
         self.node_map = {gene: idx for idx, gene in enumerate(unique_genes)}
         self.num_nodes = len(self.node_map)
         print(f"Number of nodes: {self.num_nodes}")
         
-        # Create graph structure ONCE using HiC data
         self.create_graph_structure()
-        
-        # Load embeddings as node features
         self.load_node_embeddings()
     
     def create_graph_structure(self):
         """Create graph structure using HiC interactions"""
-        # Create adjacency matrix from HiC data
         adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
         for _, row in self.df.iterrows():
             i = self.node_map[row['Gene1']]
@@ -49,7 +43,6 @@ class TemporalGraphDataset:
             adj_matrix[i, j] = row['HiC_Interaction']
             adj_matrix[j, i] = row['HiC_Interaction']
         
-        # Create edge index and weights
         edge_index = []
         edge_weights = []
         for i in range(self.num_nodes):
@@ -61,24 +54,21 @@ class TemporalGraphDataset:
         self.edge_index = torch.tensor(edge_index).t().contiguous()
         edge_weights = torch.tensor(edge_weights, dtype=torch.float)
         
-        # Normalize edge weights with min-max normalization
-        edge_weights = (edge_weights - edge_weights.min()) / (edge_weights.max() - edge_weights.min() + 1e-6)
+        # Normalize edge weights
+        edge_weights = (edge_weights - edge_weights.mean()) / (edge_weights.std() + 1e-6)
         self.edge_attr = edge_weights.unsqueeze(1)
         
         print(f"Graph structure created: {len(edge_weights)} edges")
     
     def load_node_embeddings(self):
-        """Load pre-computed node2vec embeddings"""
+        # Standard Scaler is removed for node embedding loading because there is a mismatch
         self.node_features = {}
-        scaler = StandardScaler()
         
         for t in self.time_points:
-            # Load embeddings for this time point
             embedding_file = os.path.join(self.embedding_dir, f'embeddings_time_{t}.txt')
             if not os.path.exists(embedding_file):
                 raise FileNotFoundError(f"No embedding file found for time {t}")
             
-            # Read embeddings
             embeddings = {}
             with open(embedding_file, 'r') as f:
                 for line in f:
@@ -89,23 +79,20 @@ class TemporalGraphDataset:
                     embedding = np.array([float(x) for x in parts[1:]])
                     embeddings[gene] = embedding
             
-            # Create feature matrix
             features = []
             for gene in self.node_map.keys():
                 if gene in embeddings:
                     features.append(embeddings[gene])
                 else:
                     print(f"Warning: No embedding for gene {gene} at time {t}")
-                    features.append(np.zeros(128))  # Default embedding size
+                    features.append(np.zeros(128))
             
-            features = np.array(features)
+            # Store features without additional normalization
+            self.node_features[t] = torch.tensor(np.array(features), dtype=torch.float)
             
-            # Normalize features
             if t == self.time_points[0]:
-                scaler.fit(features)
-            features_normalized = scaler.transform(features)
-            
-            self.node_features[t] = torch.tensor(features_normalized, dtype=torch.float)
+                print(f"Feature dimension: {self.node_features[t].shape[1]}")
+                print(f"Feature range: [{self.node_features[t].min():.4f}, {self.node_features[t].max():.4f}]")
     
     def create_graph(self, time_point):
         """Create graph with embeddings as node features"""
@@ -115,33 +102,28 @@ class TemporalGraphDataset:
             edge_attr=self.edge_attr,
             num_nodes=self.num_nodes
         )
+    
     def get_temporal_sequences(self):
         """Create sequences of temporal graphs for training"""
         sequences = []
         labels = []
         
-        # Create sequences
         for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
-            # Input sequence
             seq_graphs = [self.create_graph(t) for t in self.time_points[i:i+self.seq_len]]
-            
-            # Target sequence
             label_graphs = [self.create_graph(t) for t in 
-                        self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]]
+                          self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]]
             
-            sequences.append(seq_graphs)
-            labels.append(label_graphs)
-            
-            # Debug info
-            if i == 0:  # Print info for first sequence only
-                print(f"\nExample sequence:")
+            if i == 0:
+                print("\nSequence information:")
                 print(f"Input time points: {self.time_points[i:i+self.seq_len]}")
                 print(f"Target time points: {self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]}")
                 print(f"Feature dimension: {seq_graphs[0].x.shape[1]}")
+                print(f"Feature range: [{seq_graphs[0].x.min():.4f}, {seq_graphs[0].x.max():.4f}]")
+            
+            sequences.append(seq_graphs)
+            labels.append(label_graphs)
         
         print(f"\nCreated {len(sequences)} sequences")
-        print(f"Each sequence has {len(sequences[0])} time points")
-        
         return sequences, labels
                 
 class STGCNLayer(nn.Module):
@@ -381,49 +363,160 @@ def visualize_predictions_detailed(model, test_sequences, test_labels, save_dir=
                 
         return metrics
 
-if __name__ == "__main__":
 
+def calculate_prediction_metrics(predictions, targets, dim_names=None):
+    
+    if dim_names is None:
+        dim_names = [f"Dimension_{i}" for i in range(predictions.shape[-1])]
+    
+    metrics = {}
+    
+    for dim in range(predictions.shape[-1]):
+        pred = predictions[..., dim].flatten()
+        true = targets[..., dim].flatten()
+        
+        mse = np.mean((pred - true) ** 2)
+        mae = np.mean(np.abs(pred - true))
+        
+        corr = np.corrcoef(pred, true)[0, 1]
+        
+        ss_res = np.sum((true - pred) ** 2)
+        ss_tot = np.sum((true - np.mean(true)) ** 2)
+        r2 = 1 - (ss_res / ss_tot)
+        
+        metrics[dim_names[dim]] = {
+            'MSE': mse,
+            'MAE': mae,
+            'Correlation': corr,
+            'R2': r2
+        }
+
+    metrics['Overall'] = {
+        'MSE': np.mean((predictions - targets) ** 2),
+        'MAE': np.mean(np.abs(predictions - targets)),
+        'Correlation': np.mean([m['Correlation'] for m in metrics.values() if isinstance(m, dict)]),
+        'R2': np.mean([m['R2'] for m in metrics.values() if isinstance(m, dict)])
+    }
+    
+    return metrics
+
+def plot_prediction_accuracy(predictions, targets, save_dir='plottings_embedding_combined'):
+   
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 1. Overall scatter plot
+    plt.figure(figsize=(10, 10))
+    plt.scatter(targets.flatten(), predictions.flatten(), alpha=0.1)
+    plt.plot([targets.min(), targets.max()], [targets.min(), targets.max()], 'r--')
+    plt.xlabel('True Values')
+    plt.ylabel('Predicted Values')
+    plt.title('True vs Predicted Values (All Dimensions)')
+    plt.savefig(os.path.join(save_dir, 'overall_predictions.png'))
+    plt.close()
+    
+    # 2. Dimension-wise plots
+    n_dims = min(6, predictions.shape[-1])  # Show up to 6 dimensions
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    axes = axes.ravel()
+    
+    for i in range(n_dims):
+        ax = axes[i]
+        ax.scatter(targets[..., i].flatten(), 
+                  predictions[..., i].flatten(), 
+                  alpha=0.1)
+        ax.plot([targets[..., i].min(), targets[..., i].max()], 
+                [targets[..., i].min(), targets[..., i].max()], 
+                'r--')
+        ax.set_title(f'Dimension {i+1}')
+        ax.set_xlabel('True Values')
+        ax.set_ylabel('Predicted Values')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'dimension_predictions.png'))
+    plt.close()
+    
+    # 3. Error distribution
+    errors = predictions - targets
+    plt.figure(figsize=(10, 6))
+    plt.hist(errors.flatten(), bins=50)
+    plt.title('Prediction Error Distribution')
+    plt.xlabel('Prediction Error')
+    plt.ylabel('Frequency')
+    plt.savefig(os.path.join(save_dir, 'error_distribution.png'))
+    plt.close()
+    
+    # 4. Error heatmap
+    plt.figure(figsize=(12, 6))
+    sns.heatmap(np.abs(errors[0]), cmap='YlOrRd')
+    plt.title('Absolute Prediction Error Heatmap')
+    plt.xlabel('Dimension')
+    plt.ylabel('Sample')
+    plt.savefig(os.path.join(save_dir, 'error_heatmap.png'))
+    plt.close()
+
+def evaluate_model(model, test_sequences, test_labels, save_dir='plottings_embedding_combined'):
+   
+    model.eval()
+    all_predictions = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for seq, label in zip(test_sequences, test_labels):
+            # Get predictions
+            pred = model(seq)
+            target = torch.stack([g.x for g in label]).mean(dim=0)
+            
+            all_predictions.append(pred.numpy())
+            all_targets.append(target.numpy())
+    
+    predictions = np.stack(all_predictions)
+    targets = np.stack(all_targets)
+    
+    metrics = calculate_prediction_metrics(predictions, targets)
+    
+    plot_prediction_accuracy(predictions, targets, save_dir)
+    
+    with open(os.path.join(save_dir, 'prediction_metrics.txt'), 'w') as f:
+        f.write('Prediction Metrics:\n\n')
+        for dim, dim_metrics in metrics.items():
+            f.write(f'\n{dim}:\n')
+            for metric_name, value in dim_metrics.items():
+                f.write(f'{metric_name}: {value:.4f}\n')
+    
+    return metrics
+
+if __name__ == "__main__":
+    # Load and prepare data
     dataset = TemporalGraphDataset(
         csv_file='mapped/enhanced_interactions.csv',
         embedding_dir='embeddings_txt',
-        seq_len=10, 
+        seq_len=10,
         pred_len=1
     )
-
+    
     sequences, labels = dataset.get_temporal_sequences()
-
-    print("\nDataset information:")
-    print(f"Number of sequences: {len(sequences)}")
-    print(f"Sequence length: {len(sequences[0])}")
-    print(f"Number of nodes: {dataset.num_nodes}")
-    print(f"Feature dimension: {sequences[0][0].x.shape[1]}")
-
+    
+    # Split data
     train_seq, val_seq, train_labels, val_labels = train_test_split(
         sequences, labels, test_size=0.2, random_state=42
     )
-
+    
+    # Create model
     model = STGCN(
         num_nodes=dataset.num_nodes,
         in_channels=128,  # Node2Vec embedding dimension
-        hidden_channels=64,
+        hidden_channels=32,
         out_channels=128,
         num_layers=3
     )
     
+    # Train model
     train_losses, val_losses = train_model(
         model, train_seq, train_labels, val_seq, val_labels
     )
 
-    print("\nCreating prediction visualizations...")
-    metrics = visualize_predictions_detailed(model, val_seq, val_labels)
     
-    print("\nPrediction Metrics:")
-    print(f"MSE: {metrics['MSE']:.6f}")
-    print(f"MAE: {metrics['MAE']:.6f}")
-    print("\nCorrelations by dimension:")
-    for i, corr in enumerate(metrics['Correlations']):
-        print(f"Dimension {i+1}: {corr:.6f}")
-
+    # Plot training progress
     plt.figure(figsize=(10, 6))
     plt.plot(train_losses, label='Training Loss')
     plt.plot(val_losses, label='Validation Loss')
@@ -432,4 +525,14 @@ if __name__ == "__main__":
     plt.title('Training Progress with Node2Vec Embeddings')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_embedding_combined/final_training_progress.png')
+    plt.savefig('plottings_embedding_combined/training_progress.png')
+
+    print("\nEvaluating model predictions...")
+    metrics = evaluate_model(model, val_seq, val_labels)
+    
+    print("\nOverall Prediction Metrics:")
+    for metric_name, value in metrics['Overall'].items():
+        print(f"{metric_name}: {value:.4f}")
+    
+    
+   
