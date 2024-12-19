@@ -12,6 +12,7 @@ import os
 import seaborn as sns
 from node2vec import Node2Vec
 from scipy.stats import pearsonr
+from models import BaseSTGCN, EnhancedSTGCN
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -175,69 +176,6 @@ class TemporalGraphDataset:
         print(f"\nCreated {len(sequences)} sequences")
         return sequences, labels
 
-class STGCNLayer(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(STGCNLayer, self).__init__()
-        self.temporal_conv = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.spatial_conv = GCNConv(out_channels, out_channels)
-        self.instance_norm = nn.InstanceNorm1d(out_channels, affine=True)
-        
-        nn.init.xavier_uniform_(self.temporal_conv.weight, gain=0.1)
-        nn.init.constant_(self.temporal_conv.bias, 0.0)
-    
-    def forward(self, x, edge_index, edge_weight):
-        x_stack = torch.stack(x)
-        x_combined = x_stack.permute(1, 2, 0)  # [num_nodes, features, seq_len]
-        
-        x_combined = self.temporal_conv(x_combined)
-        x_combined = torch.clamp(x_combined, min=-10, max=10)
-        x_combined = self.instance_norm(x_combined)
-        x_combined = F.relu(x_combined)
-        
-        x_combined = x_combined.permute(0, 2, 1)  # [num_nodes, seq_len, features]
-        
-        output = []
-        for t in range(x_combined.size(1)):
-            x_t = x_combined[:, t, :]
-            edge_weight_norm = F.softmax(edge_weight, dim=0)
-            out_t = self.spatial_conv(x_t, edge_index, edge_weight_norm)
-            out_t = F.relu(out_t)
-            out_t = torch.clamp(out_t, min=-10, max=10)
-            output.append(out_t)
-        
-        return output
-
-class STGCN(nn.Module):
-    def __init__(self, num_nodes, in_channels, hidden_channels, out_channels, num_layers=3):
-        super(STGCN, self).__init__()
-        
-        self.num_layers = num_layers
-        self.input_layer = STGCNLayer(in_channels, hidden_channels)
-        
-        self.hidden_layers = nn.ModuleList([
-            STGCNLayer(hidden_channels, hidden_channels)
-            for _ in range(num_layers-2)
-        ])
-        
-        self.output_layer = nn.Linear(hidden_channels, out_channels)
-    
-    def forward(self, graph_sequence):
-        x = [g.x for g in graph_sequence]
-        edge_index = graph_sequence[0].edge_index
-        edge_weight = graph_sequence[0].edge_attr.squeeze()
-        
-        x = self.input_layer(x, edge_index, edge_weight)
-        
-        for layer in self.hidden_layers:
-            x = layer(x, edge_index, edge_weight)
-        
-        outputs = []
-        for x_t in x:
-            out_t = self.output_layer(x_t)
-            outputs.append(out_t)
-        
-        return torch.stack(outputs).mean(dim=0)
-
 def train_model(model, train_sequences, train_labels, val_sequences, val_labels, 
                 num_epochs=80, learning_rate=0.0001):
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -330,17 +268,17 @@ def train_model_with_early_stopping_combined_loss(
         if val_loss < best_val_loss - threshold:
             best_val_loss = val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), 'plottings_hubber_loss_node2vec_num_walk_80_combined_loss/best_model.pth') 
+            torch.save(model.state_dict(), 'plottings_EnhancedSTGCN_combined_loss/best_model.pth') 
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print("Early stopping triggered.")
                 break
     
-    model.load_state_dict(torch.load('plottings_hubber_loss_node2vec_num_walk_80_combined_loss/best_model.pth'))
+    model.load_state_dict(torch.load('plottings_EnhancedSTGCN_combined_loss/best_model.pth'))
     return train_losses, val_losses
 
-def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_hubber_loss_node2vec_num_walk_80_combined_loss'):
+def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_EnhancedSTGCN_combined_loss'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
 
@@ -412,7 +350,7 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir
         
         return gene_metrics, avg_corr
 
-def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_hubber_loss_node2vec_num_walk_80_combined_loss'):
+def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_EnhancedSTGCN_combined_loss'):
     os.makedirs(save_dir, exist_ok=True)
     
     with torch.no_grad():
@@ -445,7 +383,7 @@ def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='pl
         
         return interaction_corr
 
-def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_hubber_loss_node2vec_num_walk_80_combined_loss'):
+def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_EnhancedSTGCN_combined_loss'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     metrics = {}
@@ -536,13 +474,13 @@ if __name__ == "__main__":
        sequences, labels, test_size=0.2, random_state=42
     )
     
-    model = STGCN(
-        num_nodes=dataset.num_nodes,
-        in_channels=64,  # Same as embedding_dim
-        hidden_channels=32,
-        out_channels=64,  # Same as embedding_dim
-        num_layers=3
-    )
+    model = EnhancedSTGCN(
+    num_nodes=dataset.num_nodes,
+    in_channels=64,
+    hidden_channels=32,
+    out_channels=64,
+    num_layers=3
+)
     
     #train_losses, val_losses = train_model(
     #   model, train_seq, train_labels, val_seq, val_labels
@@ -560,7 +498,7 @@ if __name__ == "__main__":
     plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_hubber_loss_node2vec_num_walk_80_combined_loss/training_progress.png')
+    plt.savefig('plottings_EnhancedSTGCN_combined_loss/training_progress.png')
 
     print("\nAnalyzing predictions...")
     gene_metrics, avg_corr = analyze_gene_predictions(model, val_seq, val_labels, dataset)
