@@ -11,8 +11,7 @@ import matplotlib.pyplot as plt
 import os
 import seaborn as sns
 from node2vec import Node2Vec
-from sklearn.metrics import r2_score
-from sklearn.model_selection import KFold
+from scipy.stats import pearsonr
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -20,6 +19,32 @@ def clean_gene_name(gene_name):
         return gene_name
     return gene_name.split('(')[0].strip()
 
+class CombinedLoss(nn.Module):
+    def __init__(self, alpha=0.6, beta=0.4):
+        super(CombinedLoss, self).__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.mse = nn.MSELoss()
+        self.huber = nn.HuberLoss(delta=1.0)
+    
+    def forward(self, pred, target):
+        mse_loss = self.mse(pred, target)
+        
+        # Huber loss for robustness to outliers
+        huber_loss = self.huber(pred, target)
+        
+        # Correlation loss to preserve patterns
+        pred_flat = pred.view(-1)
+        target_flat = target.view(-1)
+        
+        vx = pred_flat - torch.mean(pred_flat)
+        vy = target_flat - torch.mean(target_flat)
+        
+        corr = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)) + 1e-12)
+        corr_loss = 1 - corr
+        
+        return self.alpha * (0.5 * mse_loss + 0.5 * huber_loss) + self.beta * corr_loss
+    
 class TemporalGraphDataset:
     def __init__(self, csv_file, embedding_dim=64, seq_len=10, pred_len=1):
         self.seq_len = seq_len
@@ -102,7 +127,7 @@ class TemporalGraphDataset:
                 dimensions=self.embedding_dim,
                 walk_length=10,
                 num_walks=80,
-                workers=4,
+                workers=1,
                 p=1,
                 q=1,
                 weight_key='weight'
@@ -258,69 +283,12 @@ def train_model(model, train_sequences, train_labels, val_sequences, val_labels,
     
     return train_losses, val_losses
 
-def train_model_with_early_stopping(model, train_sequences, train_labels, 
-                                    val_sequences, val_labels, 
-                                    num_epochs=80, learning_rate=0.0001, 
-                                    patience=10):
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = nn.MSELoss()
-    best_val_loss = float('inf')
-    patience_counter = 0
-    
-    train_losses = []
-    val_losses = []
-    
-    for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0
-        
-        for seq, label in zip(train_sequences, train_labels):
-            optimizer.zero_grad()
-            output = model(seq)
-            target = torch.stack([g.x for g in label]).mean(dim=0)
-            loss = criterion(output, target)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for seq, label in zip(val_sequences, val_labels):
-                output = model(seq)
-                target = torch.stack([g.x for g in label]).mean(dim=0)
-                val_loss += criterion(output, target).item()
-        
-        train_loss = total_loss / len(train_sequences)
-        val_loss = val_loss / len(val_sequences)
-        
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        
-        print(f'Epoch {epoch+1}/{num_epochs}')
-        print(f'Training Loss: {train_loss:.4f}')
-        print(f'Validation Loss: {val_loss:.4f}\n')
-        
-        # Early stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), 'best_model.pth') 
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print("Early stopping triggered.")
-                break
-    
-    model.load_state_dict(torch.load('best_model.pth'))
-    return train_losses, val_losses
-
-def train_model_with_early_stopping_huber_loss(
+def train_model_with_early_stopping_combined_loss(
     model, train_sequences, train_labels, val_sequences, val_labels, 
-    num_epochs=80, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-5):
+    num_epochs=80, learning_rate=0.00005, patience=10, delta=1.0, threshold=1e-4):
    
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = nn.HuberLoss(delta=delta)
+    criterion = CombinedLoss(alpha=0.6, beta=0.4)
     best_val_loss = float('inf')
     patience_counter = 0
     
@@ -362,17 +330,17 @@ def train_model_with_early_stopping_huber_loss(
         if val_loss < best_val_loss - threshold:
             best_val_loss = val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), 'plottings_hubber_loss/best_model.pth') 
+            torch.save(model.state_dict(), 'plottings_hubber_loss_node2vec_num_walk_80_combined_loss/best_model.pth') 
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print("Early stopping triggered.")
                 break
     
-    model.load_state_dict(torch.load('plottings_hubber_loss/best_model.pth'))
+    model.load_state_dict(torch.load('plottings_hubber_loss_node2vec_num_walk_80_combined_loss/best_model.pth'))
     return train_losses, val_losses
 
-def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_hubber_loss'):
+def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_hubber_loss_node2vec_num_walk_80_combined_loss'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
 
@@ -395,6 +363,8 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir
         for i, gene in enumerate(genes):
             gene_pred = predictions[:, i, :]
             gene_target = targets[:, i, :]
+
+            corr, _ = pearsonr(gene_pred.flatten(), gene_target.flatten())
 
             mse = np.mean((gene_pred - gene_target) ** 2)
             mae = np.mean(np.abs(gene_pred - gene_target))
@@ -436,10 +406,13 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir
             plt.tight_layout()
             plt.savefig(os.path.join(save_dir, 'gene_performance_comparison.png'))
             plt.close()
+             
+            avg_corr = np.mean([m['Correlation'] for m in gene_metrics.values()])
+            print(f"\nAverage Pearson Correlation: {avg_corr:.4f}")
         
-        return gene_metrics
+        return gene_metrics, avg_corr
 
-def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_hubber_loss'):
+def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_hubber_loss_node2vec_num_walk_80_combined_loss'):
     os.makedirs(save_dir, exist_ok=True)
     
     with torch.no_grad():
@@ -472,72 +445,82 @@ def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='pl
         
         return interaction_corr
 
-def visualize_predictions(model, val_sequences, val_labels, save_dir='plottings_combined'):
+def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_hubber_loss_node2vec_num_walk_80_combined_loss'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
+    metrics = {}
     
     with torch.no_grad():
-        # Get predictions and targets for the first sequence
-        seq = val_sequences[0]
-        label = val_labels[0]
+        all_predictions = []
+        all_targets = []
         
-        pred = model(seq)
-        target = torch.stack([g.x for g in label]).mean(dim=0)
-   
-        pred_np = pred.numpy()
-        target_np = target.numpy()
+        for seq, label in zip(val_sequences, val_labels):
+            pred = model(seq)
+            target = torch.stack([g.x for g in label]).mean(dim=0)
+            all_predictions.append(pred.numpy())
+            all_targets.append(target.numpy())
         
-        num_genes = min(6, pred_np.shape[0])
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-        axes = axes.ravel()
+        predictions = np.stack(all_predictions)
+        targets = np.stack(all_targets)
         
-        for i in range(num_genes):
-            ax = axes[i]
+        # 1. Overall Time Series Metrics
+        metrics['Overall'] = {
+            'MSE': np.mean((predictions - targets) ** 2),
+            'MAE': np.mean(np.abs(predictions - targets)),
+            'RMSE': np.sqrt(np.mean((predictions - targets) ** 2)),
+            'Pearson_Correlation': pearsonr(predictions.flatten(), targets.flatten())[0],
+            'R2_Score': 1 - np.sum((predictions - targets) ** 2) / np.sum((targets - np.mean(targets)) ** 2)
+        }
+        
+        genes = list(dataset.node_map.keys())
+        gene_correlations = []
+        
+        for i, gene in enumerate(genes):
+            gene_pred = predictions[:, i, :]
+            gene_target = targets[:, i, :]
+            corr = pearsonr(gene_pred.flatten(), gene_target.flatten())[0]
+            gene_correlations.append(corr)
             
-            times = range(pred_np.shape[1]) 
-            ax.plot(times, pred_np[i, :], 'r-', label='Predicted', alpha=0.7)
-            ax.plot(times, target_np[i, :], 'b-', label='Actual', alpha=0.7)
-            
-            ax.set_title(f'Gene {i+1}')
-            ax.set_xlabel('Embedding Dimension')
-            ax.set_ylabel('Value')
-            ax.legend()
-            ax.grid(True)
+            plt.figure(figsize=(10, 6))
+            plt.plot(gene_target[0], label='Actual', alpha=0.7)
+            plt.plot(gene_pred[0], label='Predicted', alpha=0.7)
+            plt.title(f'{gene} Prediction (corr={corr:.3f})')
+            plt.legend()
+            plt.savefig(os.path.join(save_dir, f'{gene}_prediction.png'))
+            plt.close()
         
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'time_series_predictions.png'))
-        plt.close()
+        metrics['Gene_Performance'] = {
+            'Mean_Correlation': np.mean(gene_correlations),
+            'Median_Correlation': np.median(gene_correlations),
+            'Std_Correlation': np.std(gene_correlations),
+            'Best_Genes': [genes[i] for i in np.argsort(gene_correlations)[-5:]],
+            'Worst_Genes': [genes[i] for i in np.argsort(gene_correlations)[:5]]
+        }
         
-        plt.figure(figsize=(10, 6))
-        plt.scatter(target_np.flatten(), pred_np.flatten(), alpha=0.1)
-        plt.plot([target_np.min(), target_np.max()], 
-                [target_np.min(), target_np.max()], 'r--', label='Perfect Prediction')
-        plt.xlabel('Actual Values')
-        plt.ylabel('Predicted Values')
-        plt.title('Predicted vs Actual Values')
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(os.path.join(save_dir, 'prediction_scatter.png'))
-        plt.close()
+        temporal_corrs = []
+        for t in range(predictions.shape[1]):
+            corr = pearsonr(predictions[:, t, :].flatten(), 
+                          targets[:, t, :].flatten())[0]
+            temporal_corrs.append(corr)
         
-        errors = pred_np - target_np
-        plt.figure(figsize=(10, 6))
-        plt.hist(errors.flatten(), bins=50, alpha=0.7)
-        plt.xlabel('Prediction Error')
-        plt.ylabel('Frequency')
-        plt.title('Distribution of Prediction Errors')
-        plt.grid(True)
-        plt.savefig(os.path.join(save_dir, 'error_distribution.png'))
-        plt.close()
+        metrics['Temporal_Stability'] = {
+            'Mean_Temporal_Correlation': np.mean(temporal_corrs),
+            'Std_Temporal_Correlation': np.std(temporal_corrs),
+            'Min_Temporal_Correlation': np.min(temporal_corrs),
+            'Max_Temporal_Correlation': np.max(temporal_corrs)
+        }
         
-        mse = np.mean((pred_np - target_np) ** 2)
-        mae = np.mean(np.abs(pred_np - target_np))
+        with open(os.path.join(save_dir, 'full_evaluation.txt'), 'w') as f:
+            f.write("Model Evaluation Results\n\n")
+            for category, category_metrics in metrics.items():
+                f.write(f"\n{category}:\n")
+                for metric, value in category_metrics.items():
+                    if isinstance(value, (float, int)):
+                        f.write(f"{metric}: {value:.4f}\n")
+                    else:
+                        f.write(f"{metric}: {value}\n")
         
-        with open(os.path.join(save_dir, 'metrics.txt'), 'w') as f:
-            f.write('Prediction Metrics:\n')
-            f.write(f'MSE: {mse:.6f}\n')
-            f.write(f'MAE: {mae:.6f}\n')
-
+        return metrics
 
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
@@ -565,9 +548,8 @@ if __name__ == "__main__":
     #   model, train_seq, train_labels, val_seq, val_labels
     #)
 
-    train_losses, val_losses = train_model_with_early_stopping_huber_loss(
-        model, train_seq, train_labels, val_seq, val_labels, 
-        num_epochs=100, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-5
+    train_losses, val_losses = train_model_with_early_stopping_combined_loss(
+        model, train_seq, train_labels, val_seq, val_labels
     )
     
     plt.figure(figsize=(10, 6))
@@ -578,15 +560,23 @@ if __name__ == "__main__":
     plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_hubber_loss/training_progress.png')
-
-    #print("\nCreating prediction visualizations...")
-    #visualize_predictions(model, val_seq, val_labels)
+    plt.savefig('plottings_hubber_loss_node2vec_num_walk_80_combined_loss/training_progress.png')
 
     print("\nAnalyzing predictions...")
-    gene_metrics = analyze_gene_predictions(model, val_seq, val_labels, dataset)
+    gene_metrics, avg_corr = analyze_gene_predictions(model, val_seq, val_labels, dataset)
     interaction_corr = analyze_interactions(model, val_seq, val_labels, dataset)
     
-    print("\nPrediction Summary:")
-    print(f"Average Gene Correlation: {np.mean([m['Correlation'] for m in gene_metrics.values()]):.4f}")
+    #print("\nPrediction Summary:")
+    #print(f"Average Gene Correlation: {np.mean([m['Correlation'] for m in gene_metrics.values()]):.4f}")
     print(f"Interaction Preservation: {interaction_corr:.4f}")
+
+    metrics = evaluate_model_performance(model, val_seq, val_labels, dataset)
+    print("\nModel Performance Summary:")
+    print(f"Overall Pearson Correlation: {metrics['Overall']['Pearson_Correlation']:.4f}")
+    print(f"RMSE: {metrics['Overall']['RMSE']:.4f}")
+    print(f"R² Score: {metrics['Overall']['R2_Score']:.4f}")
+    print(f"\nGene-wise Performance:")
+    print(f"Mean Gene Correlation: {metrics['Gene_Performance']['Mean_Correlation']:.4f}")
+    print(f"Best Performing Genes: {', '.join(metrics['Gene_Performance']['Best_Genes'])}")
+    print(f"\nTemporal Stability:")
+    print(f"Mean Temporal Correlation: {metrics['Temporal_Stability']['Mean_Temporal_Correlation']:.4f}")
