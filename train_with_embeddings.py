@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import os
 import seaborn as sns
 from node2vec import Node2Vec
+from sklearn.metrics import r2_score
+from sklearn.model_selection import KFold
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -256,6 +258,63 @@ def train_model(model, train_sequences, train_labels, val_sequences, val_labels,
     
     return train_losses, val_losses
 
+def train_model_with_early_stopping(model, train_sequences, train_labels, 
+                                    val_sequences, val_labels, 
+                                    num_epochs=80, learning_rate=0.0001, 
+                                    patience=10):
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.MSELoss()
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    train_losses = []
+    val_losses = []
+    
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        
+        for seq, label in zip(train_sequences, train_labels):
+            optimizer.zero_grad()
+            output = model(seq)
+            target = torch.stack([g.x for g in label]).mean(dim=0)
+            loss = criterion(output, target)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for seq, label in zip(val_sequences, val_labels):
+                output = model(seq)
+                target = torch.stack([g.x for g in label]).mean(dim=0)
+                val_loss += criterion(output, target).item()
+        
+        train_loss = total_loss / len(train_sequences)
+        val_loss = val_loss / len(val_sequences)
+        
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        
+        print(f'Epoch {epoch+1}/{num_epochs}')
+        print(f'Training Loss: {train_loss:.4f}')
+        print(f'Validation Loss: {val_loss:.4f}\n')
+        
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), 'best_model.pth') 
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered.")
+                break
+    
+    model.load_state_dict(torch.load('best_model.pth'))
+    return train_losses, val_losses
+
 def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_combined'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
@@ -434,7 +493,7 @@ if __name__ == "__main__":
     sequences, labels = dataset.get_temporal_sequences()
     
     train_seq, val_seq, train_labels, val_labels = train_test_split(
-        sequences, labels, test_size=0.2, random_state=42
+       sequences, labels, test_size=0.2, random_state=42
     )
     
     model = STGCN(
@@ -445,7 +504,11 @@ if __name__ == "__main__":
         num_layers=3
     )
     
-    train_losses, val_losses = train_model(
+    #train_losses, val_losses = train_model(
+    #   model, train_seq, train_labels, val_seq, val_labels
+    #)
+
+    train_losses, val_losses = train_model_with_early_stopping(
         model, train_seq, train_labels, val_seq, val_labels
     )
     
