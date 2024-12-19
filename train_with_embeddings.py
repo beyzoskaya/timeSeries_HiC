@@ -6,96 +6,120 @@ import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
 import networkx as nx
-from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import os
 import seaborn as sns
+from node2vec import Node2Vec
+
+def clean_gene_name(gene_name):
+    """Clean gene name by removing descriptions and extra information"""
+    if pd.isna(gene_name):
+        return gene_name
+    return gene_name.split('(')[0].strip()
 
 class TemporalGraphDataset:
-    def __init__(self, csv_file, embedding_dir='embeddings_txt', seq_len=10, pred_len=1):
+    def __init__(self, csv_file, embedding_dim=64, seq_len=10, pred_len=1):
         self.seq_len = seq_len
         self.pred_len = pred_len
+        
         self.df = pd.read_csv(csv_file)
-        self.embedding_dir = embedding_dir
+        self.df['Gene1_clean'] = self.df['Gene1'].apply(clean_gene_name)
+        self.df['Gene2_clean'] = self.df['Gene2'].apply(clean_gene_name)
+        
+        self.embedding_dim = embedding_dim
         self.process_data()
     
     def process_data(self):
+        """
+        create nodes as number of unique genes
+        get time column and time points to create a time series graph after
+        first create graph with those time points then create the embeddings
+        """
+        unique_genes = pd.concat([self.df['Gene1_clean'], self.df['Gene2_clean']]).unique()
+        self.node_map = {gene: idx for idx, gene in enumerate(unique_genes)}
+        self.num_nodes = len(self.node_map)
+        print(f"Number of nodes: {self.num_nodes}")
+        
         self.time_cols = [col for col in self.df.columns if 'Time_' in col]
         self.time_points = sorted(list(set([float(col.split('_')[-1]) 
                                           for col in self.time_cols if 'Gene1' in col])))
         print(f"Found {len(self.time_points)} time points")
         
-        unique_genes = pd.concat([self.df['Gene1'], self.df['Gene2']]).unique()
-        self.node_map = {gene: idx for idx, gene in enumerate(unique_genes)}
-        self.num_nodes = len(self.node_map)
-        print(f"Number of nodes: {self.num_nodes}")
+        G, self.edge_index, self.edge_attr = self.create_graph_structure(self.time_points[0])
+        print(f"Graph structure created with {len(self.edge_attr)} edges")
         
-        self.create_graph_structure()
-        self.load_node_embeddings()
+        self.create_temporal_embeddings()
     
-    def create_graph_structure(self):
-        """Create graph structure using HiC interactions"""
-        adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
+    def create_graph_structure(self, time_point):
+        G = nx.Graph()
+        
+        genes = list(self.node_map.keys())
+        G.add_nodes_from(genes)
+        
         for _, row in self.df.iterrows():
-            i = self.node_map[row['Gene1']]
-            j = self.node_map[row['Gene2']]
-            adj_matrix[i, j] = row['HiC_Interaction']
-            adj_matrix[j, i] = row['HiC_Interaction']
+            hic_weight = row['HiC_Interaction']
+            compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
+            tad_dist = abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance'])
+            tad_sim = 1 / (1 + tad_dist)
+            ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
+            expr_sim = 1 / (1 + abs(row[f'Gene1_Time_{time_point}'] - row[f'Gene2_Time_{time_point}']))
+            
+            weight = (hic_weight * 0.4 + 
+                     compartment_sim * 0.15 + 
+                     tad_sim * 0.15 + 
+                     ins_sim * 0.15 + 
+                     expr_sim * 0.15)
+            
+            G.add_edge(row['Gene1_clean'], row['Gene2_clean'], weight=weight)
         
         edge_index = []
         edge_weights = []
-        for i in range(self.num_nodes):
-            for j in range(i+1, self.num_nodes):
-                if adj_matrix[i, j] > 0:
-                    edge_index.extend([[i, j], [j, i]])
-                    edge_weights.extend([adj_matrix[i, j], adj_matrix[i, j]])
         
-        self.edge_index = torch.tensor(edge_index).t().contiguous()
+        for u, v, d in G.edges(data=True):
+            i, j = self.node_map[u], self.node_map[v]
+            edge_index.extend([[i, j], [j, i]])
+            edge_weights.extend([d['weight'], d['weight']])
+        
+        edge_index = torch.tensor(edge_index).t().contiguous()
         edge_weights = torch.tensor(edge_weights, dtype=torch.float)
+        edge_attr = edge_weights.unsqueeze(1)
         
-        # Normalize edge weights
-        edge_weights = (edge_weights - edge_weights.mean()) / (edge_weights.std() + 1e-6)
-        self.edge_attr = edge_weights.unsqueeze(1)
-        
-        print(f"Graph structure created: {len(edge_weights)} edges")
+        return G, edge_index, edge_attr
     
-    def load_node_embeddings(self):
-        # Standard Scaler is removed for node embedding loading because there is a mismatch
+    def create_temporal_embeddings(self):
         self.node_features = {}
         
         for t in self.time_points:
-            embedding_file = os.path.join(self.embedding_dir, f'embeddings_time_{t}.txt')
-            if not os.path.exists(embedding_file):
-                raise FileNotFoundError(f"No embedding file found for time {t}")
+            print(f"Creating embeddings for time point {t}")
             
-            embeddings = {}
-            with open(embedding_file, 'r') as f:
-                for line in f:
-                    if line.startswith('#'):
-                        continue
-                    parts = line.strip().split()
-                    gene = parts[0]
-                    embedding = np.array([float(x) for x in parts[1:]])
-                    embeddings[gene] = embedding
+            G, _, _ = self.create_graph_structure(t)
             
-            features = []
+            node2vec = Node2Vec(
+                G,
+                dimensions=self.embedding_dim,
+                walk_length=10,
+                num_walks=80,
+                workers=4,
+                p=1,
+                q=1,
+                weight_key='weight'
+            )
+            
+            model = node2vec.fit(window=10, min_count=1)
+   
+            embeddings = []
             for gene in self.node_map.keys():
-                if gene in embeddings:
-                    features.append(embeddings[gene])
-                else:
-                    print(f"Warning: No embedding for gene {gene} at time {t}")
-                    features.append(np.zeros(128))
+                emb = model.wv[gene]
+                embeddings.append(emb)
             
-            # Store features without additional normalization
-            self.node_features[t] = torch.tensor(np.array(features), dtype=torch.float)
-            
-            if t == self.time_points[0]:
-                print(f"Feature dimension: {self.node_features[t].shape[1]}")
-                print(f"Feature range: [{self.node_features[t].min():.4f}, {self.node_features[t].max():.4f}]")
+            self.node_features[t] = torch.tensor(np.array(embeddings), dtype=torch.float)
+        
+        print(f"Created embeddings with dimension {self.embedding_dim}")
+        print(f"Feature range: [{self.node_features[self.time_points[0]].min():.4f}, "
+              f"{self.node_features[self.time_points[0]].max():.4f}]")
     
-    def create_graph(self, time_point):
-        """Create graph with embeddings as node features"""
+    def get_pyg_graph(self, time_point):
         return Data(
             x=self.node_features[time_point],
             edge_index=self.edge_index,
@@ -104,13 +128,12 @@ class TemporalGraphDataset:
         )
     
     def get_temporal_sequences(self):
-        """Create sequences of temporal graphs for training"""
         sequences = []
         labels = []
         
         for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
-            seq_graphs = [self.create_graph(t) for t in self.time_points[i:i+self.seq_len]]
-            label_graphs = [self.create_graph(t) for t in 
+            seq_graphs = [self.get_pyg_graph(t) for t in self.time_points[i:i+self.seq_len]]
+            label_graphs = [self.get_pyg_graph(t) for t in 
                           self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]]
             
             if i == 0:
@@ -118,34 +141,34 @@ class TemporalGraphDataset:
                 print(f"Input time points: {self.time_points[i:i+self.seq_len]}")
                 print(f"Target time points: {self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]}")
                 print(f"Feature dimension: {seq_graphs[0].x.shape[1]}")
-                print(f"Feature range: [{seq_graphs[0].x.min():.4f}, {seq_graphs[0].x.max():.4f}]")
             
             sequences.append(seq_graphs)
             labels.append(label_graphs)
         
         print(f"\nCreated {len(sequences)} sequences")
         return sequences, labels
-                
+
 class STGCNLayer(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(STGCNLayer, self).__init__()
         self.temporal_conv = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
         self.spatial_conv = GCNConv(out_channels, out_channels)
         self.instance_norm = nn.InstanceNorm1d(out_channels, affine=True)
-
+        
         nn.init.xavier_uniform_(self.temporal_conv.weight, gain=0.1)
         nn.init.constant_(self.temporal_conv.bias, 0.0)
     
     def forward(self, x, edge_index, edge_weight):
-        x_stack = torch.stack(x) # combin temporal with spatial data
-
-        x_combined = x_stack.permute(1, 2, 0)
+        x_stack = torch.stack(x)
+        x_combined = x_stack.permute(1, 2, 0)  # [num_nodes, features, seq_len]
+        
         x_combined = self.temporal_conv(x_combined)
         x_combined = torch.clamp(x_combined, min=-10, max=10)
         x_combined = self.instance_norm(x_combined)
         x_combined = F.relu(x_combined)
-        x_combined = x_combined.permute(0, 2, 1)
-
+        
+        x_combined = x_combined.permute(0, 2, 1)  # [num_nodes, seq_len, features]
+        
         output = []
         for t in range(x_combined.size(1)):
             x_t = x_combined[:, t, :]
@@ -187,43 +210,32 @@ class STGCN(nn.Module):
             outputs.append(out_t)
         
         return torch.stack(outputs).mean(dim=0)
-    
 
-
-def train_model(model, train_sequences, train_labels, val_sequences, val_labels, num_epochs=100, learning_rate=0.0005):
+def train_model(model, train_sequences, train_labels, val_sequences, val_labels, 
+                num_epochs=80, learning_rate=0.0001):
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
-
-    os.makedirs('plottings_embedding_combined', exist_ok=True)
     
     train_losses = []
     val_losses = []
-
+    
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
-
-        for seq,label in zip(train_sequences, train_labels):
+        
+        for seq, label in zip(train_sequences, train_labels):
             optimizer.zero_grad()
-
+            
             output = model(seq)
             target = torch.stack([g.x for g in label]).mean(dim=0)
-
-            if torch.isnan(output).any() or torch.isnan(target).any():
-                print("Nan values detected, Skipping batch.")
-                continue
-
-            loss = criterion(output,target)
-
-            if torch.isnan(loss):
-                print(f"Nan loss detected in epoch {epoch}. Skipping batch.")
-                continue
-
+            
+            loss = criterion(output, target)
             loss.backward()
             optimizer.step()
-
+            
             total_loss += loss.item()
         
+        # Validation
         model.eval()
         val_loss = 0
         with torch.no_grad():
@@ -237,302 +249,223 @@ def train_model(model, train_sequences, train_labels, val_sequences, val_labels,
         
         train_losses.append(train_loss)
         val_losses.append(val_loss)
-
+        
         print(f'Epoch {epoch+1}/{num_epochs}')
         print(f'Training Loss: {train_loss:.4f}')
         print(f'Validation Loss: {val_loss:.4f}\n')
-
-        if epoch % 10 == 0:
-            plt.figure(figsize=(10, 6))
-            plt.plot(train_losses, label='Training Loss')
-            plt.plot(val_losses, label='Validation Loss')
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.title('Training Progress with Node2Vec Embeddings')
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(f'plottings_embedding/loss_epoch_{epoch}.png')
-            plt.close()
     
     return train_losses, val_losses
 
-def visualize_predictions_detailed(model, test_sequences, test_labels, save_dir='plottings_embedding_combined'):
-
+def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_combined'):
+    os.makedirs(save_dir, exist_ok=True)
     model.eval()
+
+    with torch.no_grad():
+        all_predictions = []
+        all_targets = []
+
+        for seq,label in zip(val_sequences, val_labels):
+            pred = model(seq)
+            target = torch.stack([g.x for g in label]).mean(dim=0)
+            all_predictions.append(pred.numpy())
+            all_targets.append(target.numpy())
+
+        predictions = np.stack(all_predictions)
+        targets = np.stack(all_targets)
+
+        genes = list(dataset.node_map.keys())
+
+        gene_metrics = {}
+        for i, gene in enumerate(genes):
+            gene_pred = predictions[:, i, :]
+            gene_target = targets[:, i, :]
+
+            mse = np.mean((gene_pred - gene_target) ** 2)
+            mae = np.mean(np.abs(gene_pred - gene_target))
+            corr = np.corrcoef(gene_pred.flatten(), gene_target.flatten())[0, 1]
+
+            gene_metrics[gene] = {
+                'MSE': mse,
+                'MAE': mae,
+                'Correlation': corr
+            }
+        
+            plt.figure(figsize=(10, 6))
+            plt.plot(gene_pred[0], label='Predicted', alpha=0.7)
+            plt.plot(gene_target[0], label='Actual', alpha=0.7)
+            plt.title(f'Time Series Prediction for {gene}')
+            plt.xlabel('Time Step')
+            plt.ylabel('Value')
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(save_dir, f'gene_{gene}_timeseries.png'))
+            plt.close()
+
+            metrics_df = pd.DataFrame.from_dict(gene_metrics, orient='index')
+            metrics_df.to_csv(os.path.join(save_dir, 'gene_metrics.csv'))
+
+            top_genes = metrics_df.nlargest(5, 'Correlation')
+            bottom_genes = metrics_df.nsmallest(5, 'Correlation')
+            
+            plt.figure(figsize=(12, 6))
+            plt.subplot(1, 2, 1)
+            plt.bar(top_genes.index, top_genes['Correlation'])
+            plt.title('Top 5 Best Predicted Genes')
+            plt.xticks(rotation=45)
+            
+            plt.subplot(1, 2, 2)
+            plt.bar(bottom_genes.index, bottom_genes['Correlation'])
+            plt.title('Top 5 Worst Predicted Genes')
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, 'gene_performance_comparison.png'))
+            plt.close()
+        
+        return gene_metrics
+
+def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_combined'):
     os.makedirs(save_dir, exist_ok=True)
     
     with torch.no_grad():
-
-        all_predictions = []
-        all_targets = []
+        pred = model(val_sequences[0])
+        target = torch.stack([g.x for g in val_labels[0]]).mean(dim=0)
         
-        for seq, label in zip(test_sequences, test_labels):
-            pred = model(seq)
-            target = torch.stack([g.x for g in label]).mean(dim=0)
-            all_predictions.append(pred)
-            all_targets.append(target)
+        pred_np = pred.numpy()
+        target_np = target.numpy()
         
-        predictions = torch.stack(all_predictions).numpy()
-        targets = torch.stack(all_targets).numpy()
+        pred_interactions = np.corrcoef(pred_np)
+        true_interactions = np.corrcoef(target_np)
         
-        n_dims = min(predictions.shape[-1], 6) 
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-        axes = axes.ravel()
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7))
         
-        for i in range(n_dims):
-            ax = axes[i]
-            ax.scatter(targets[..., i].flatten(), 
-                      predictions[..., i].flatten(), 
-                      alpha=0.5)
-            
-            min_val = min(targets[..., i].min(), predictions[..., i].min())
-            max_val = max(targets[..., i].max(), predictions[..., i].max())
-            ax.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Prediction')
-            
-            ax.set_xlabel('Actual Values')
-            ax.set_ylabel('Predicted Values')
-            ax.set_title(f'Dimension {i+1}')
-            ax.legend()
-            
+        sns.heatmap(true_interactions, ax=ax1, cmap='coolwarm')
+        ax1.set_title('True Interactions')
+        
+        sns.heatmap(pred_interactions, ax=ax2, cmap='coolwarm')
+        ax2.set_title('Predicted Interactions')
+        
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'prediction_scatter_plots.png'))
+        plt.savefig(os.path.join(save_dir, 'interaction_comparison.png'))
         plt.close()
-  
-        sample_idx = 0
+        
+        interaction_corr = np.corrcoef(true_interactions.flatten(), 
+                                     pred_interactions.flatten())[0, 1]
+        
+        with open(os.path.join(save_dir, 'interaction_metrics.txt'), 'w') as f:
+            f.write(f'Interaction Correlation: {interaction_corr:.4f}\n')
+        
+        return interaction_corr
+
+def visualize_predictions(model, val_sequences, val_labels, save_dir='plottings_combined'):
+    os.makedirs(save_dir, exist_ok=True)
+    model.eval()
+    
+    with torch.no_grad():
+        # Get predictions and targets for the first sequence
+        seq = val_sequences[0]
+        label = val_labels[0]
+        
+        pred = model(seq)
+        target = torch.stack([g.x for g in label]).mean(dim=0)
+   
+        pred_np = pred.numpy()
+        target_np = target.numpy()
+        
+        num_genes = min(6, pred_np.shape[0])
         fig, axes = plt.subplots(2, 3, figsize=(15, 10))
         axes = axes.ravel()
         
-        for i in range(n_dims):
+        for i in range(num_genes):
             ax = axes[i]
-            ax.plot(targets[sample_idx, :, i], 'b-', label='Actual', marker='o')
-            ax.plot(predictions[sample_idx, :, i], 'r--', label='Predicted', marker='s')
-            ax.set_title(f'Dimension {i+1} Over Time')
-            ax.set_xlabel('Time Step')
+            
+            times = range(pred_np.shape[1]) 
+            ax.plot(times, pred_np[i, :], 'r-', label='Predicted', alpha=0.7)
+            ax.plot(times, target_np[i, :], 'b-', label='Actual', alpha=0.7)
+            
+            ax.set_title(f'Gene {i+1}')
+            ax.set_xlabel('Embedding Dimension')
             ax.set_ylabel('Value')
             ax.legend()
-            
+            ax.grid(True)
+        
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'time_series_comparison.png'))
+        plt.savefig(os.path.join(save_dir, 'time_series_predictions.png'))
         plt.close()
         
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-        axes = axes.ravel()
-        
-        for i in range(n_dims):
-            ax = axes[i]
-            ax.hist(targets[..., i].flatten(), bins=30, alpha=0.5, label='Actual', color='blue')
-            ax.hist(predictions[..., i].flatten(), bins=30, alpha=0.5, label='Predicted', color='red')
-            ax.set_title(f'Distribution for Dimension {i+1}')
-            ax.legend()
-            
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'distribution_comparison.png'))
-        plt.close()
-        
-        errors = np.abs(predictions - targets)
         plt.figure(figsize=(10, 6))
-        sns.heatmap(errors[0], cmap='YlOrRd')
-        plt.title('Prediction Error Heatmap')
-        plt.xlabel('Dimension')
-        plt.ylabel('Time Step')
-        plt.savefig(os.path.join(save_dir, 'error_heatmap.png'))
+        plt.scatter(target_np.flatten(), pred_np.flatten(), alpha=0.1)
+        plt.plot([target_np.min(), target_np.max()], 
+                [target_np.min(), target_np.max()], 'r--', label='Perfect Prediction')
+        plt.xlabel('Actual Values')
+        plt.ylabel('Predicted Values')
+        plt.title('Predicted vs Actual Values')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(save_dir, 'prediction_scatter.png'))
         plt.close()
- 
-        mse = np.mean((predictions - targets) ** 2)
-        mae = np.mean(np.abs(predictions - targets))
         
-        correlations = []
-        for i in range(predictions.shape[-1]):
-            corr = np.corrcoef(predictions[..., i].flatten(), 
-                             targets[..., i].flatten())[0, 1]
-            correlations.append(corr)
+        errors = pred_np - target_np
+        plt.figure(figsize=(10, 6))
+        plt.hist(errors.flatten(), bins=50, alpha=0.7)
+        plt.xlabel('Prediction Error')
+        plt.ylabel('Frequency')
+        plt.title('Distribution of Prediction Errors')
+        plt.grid(True)
+        plt.savefig(os.path.join(save_dir, 'error_distribution.png'))
+        plt.close()
         
-        metrics = {
-            'MSE': mse,
-            'MAE': mae,
-            'Correlations': correlations
-        }
+        mse = np.mean((pred_np - target_np) ** 2)
+        mae = np.mean(np.abs(pred_np - target_np))
         
-        with open(os.path.join(save_dir, 'prediction_metrics.txt'), 'w') as f:
+        with open(os.path.join(save_dir, 'metrics.txt'), 'w') as f:
             f.write('Prediction Metrics:\n')
             f.write(f'MSE: {mse:.6f}\n')
             f.write(f'MAE: {mae:.6f}\n')
-            f.write('\nCorrelations by dimension:\n')
-            for i, corr in enumerate(correlations):
-                f.write(f'Dimension {i+1}: {corr:.6f}\n')
-                
-        return metrics
 
-
-def calculate_prediction_metrics(predictions, targets, dim_names=None):
-    
-    if dim_names is None:
-        dim_names = [f"Dimension_{i}" for i in range(predictions.shape[-1])]
-    
-    metrics = {}
-    
-    for dim in range(predictions.shape[-1]):
-        pred = predictions[..., dim].flatten()
-        true = targets[..., dim].flatten()
-        
-        mse = np.mean((pred - true) ** 2)
-        mae = np.mean(np.abs(pred - true))
-        
-        corr = np.corrcoef(pred, true)[0, 1]
-        
-        ss_res = np.sum((true - pred) ** 2)
-        ss_tot = np.sum((true - np.mean(true)) ** 2)
-        r2 = 1 - (ss_res / ss_tot)
-        
-        metrics[dim_names[dim]] = {
-            'MSE': mse,
-            'MAE': mae,
-            'Correlation': corr,
-            'R2': r2
-        }
-
-    metrics['Overall'] = {
-        'MSE': np.mean((predictions - targets) ** 2),
-        'MAE': np.mean(np.abs(predictions - targets)),
-        'Correlation': np.mean([m['Correlation'] for m in metrics.values() if isinstance(m, dict)]),
-        'R2': np.mean([m['R2'] for m in metrics.values() if isinstance(m, dict)])
-    }
-    
-    return metrics
-
-def plot_prediction_accuracy(predictions, targets, save_dir='plottings_embedding_combined'):
-   
-    os.makedirs(save_dir, exist_ok=True)
-    
-    # 1. Overall scatter plot
-    plt.figure(figsize=(10, 10))
-    plt.scatter(targets.flatten(), predictions.flatten(), alpha=0.1)
-    plt.plot([targets.min(), targets.max()], [targets.min(), targets.max()], 'r--')
-    plt.xlabel('True Values')
-    plt.ylabel('Predicted Values')
-    plt.title('True vs Predicted Values (All Dimensions)')
-    plt.savefig(os.path.join(save_dir, 'overall_predictions.png'))
-    plt.close()
-    
-    # 2. Dimension-wise plots
-    n_dims = min(6, predictions.shape[-1])  # Show up to 6 dimensions
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    axes = axes.ravel()
-    
-    for i in range(n_dims):
-        ax = axes[i]
-        ax.scatter(targets[..., i].flatten(), 
-                  predictions[..., i].flatten(), 
-                  alpha=0.1)
-        ax.plot([targets[..., i].min(), targets[..., i].max()], 
-                [targets[..., i].min(), targets[..., i].max()], 
-                'r--')
-        ax.set_title(f'Dimension {i+1}')
-        ax.set_xlabel('True Values')
-        ax.set_ylabel('Predicted Values')
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'dimension_predictions.png'))
-    plt.close()
-    
-    # 3. Error distribution
-    errors = predictions - targets
-    plt.figure(figsize=(10, 6))
-    plt.hist(errors.flatten(), bins=50)
-    plt.title('Prediction Error Distribution')
-    plt.xlabel('Prediction Error')
-    plt.ylabel('Frequency')
-    plt.savefig(os.path.join(save_dir, 'error_distribution.png'))
-    plt.close()
-    
-    # 4. Error heatmap
-    plt.figure(figsize=(12, 6))
-    sns.heatmap(np.abs(errors[0]), cmap='YlOrRd')
-    plt.title('Absolute Prediction Error Heatmap')
-    plt.xlabel('Dimension')
-    plt.ylabel('Sample')
-    plt.savefig(os.path.join(save_dir, 'error_heatmap.png'))
-    plt.close()
-
-def evaluate_model(model, test_sequences, test_labels, save_dir='plottings_embedding_combined'):
-   
-    model.eval()
-    all_predictions = []
-    all_targets = []
-    
-    with torch.no_grad():
-        for seq, label in zip(test_sequences, test_labels):
-            # Get predictions
-            pred = model(seq)
-            target = torch.stack([g.x for g in label]).mean(dim=0)
-            
-            all_predictions.append(pred.numpy())
-            all_targets.append(target.numpy())
-    
-    predictions = np.stack(all_predictions)
-    targets = np.stack(all_targets)
-    
-    metrics = calculate_prediction_metrics(predictions, targets)
-    
-    plot_prediction_accuracy(predictions, targets, save_dir)
-    
-    with open(os.path.join(save_dir, 'prediction_metrics.txt'), 'w') as f:
-        f.write('Prediction Metrics:\n\n')
-        for dim, dim_metrics in metrics.items():
-            f.write(f'\n{dim}:\n')
-            for metric_name, value in dim_metrics.items():
-                f.write(f'{metric_name}: {value:.4f}\n')
-    
-    return metrics
 
 if __name__ == "__main__":
-    # Load and prepare data
     dataset = TemporalGraphDataset(
         csv_file='mapped/enhanced_interactions.csv',
-        embedding_dir='embeddings_txt',
+        embedding_dim=64,
         seq_len=10,
         pred_len=1
     )
     
     sequences, labels = dataset.get_temporal_sequences()
     
-    # Split data
     train_seq, val_seq, train_labels, val_labels = train_test_split(
         sequences, labels, test_size=0.2, random_state=42
     )
     
-    # Create model
     model = STGCN(
         num_nodes=dataset.num_nodes,
-        in_channels=128,  # Node2Vec embedding dimension
+        in_channels=64,  # Same as embedding_dim
         hidden_channels=32,
-        out_channels=128,
+        out_channels=64,  # Same as embedding_dim
         num_layers=3
     )
     
-    # Train model
     train_losses, val_losses = train_model(
         model, train_seq, train_labels, val_seq, val_labels
     )
-
     
-    # Plot training progress
     plt.figure(figsize=(10, 6))
     plt.plot(train_losses, label='Training Loss')
     plt.plot(val_losses, label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('Training Progress with Node2Vec Embeddings')
+    plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_embedding_combined/training_progress.png')
+    plt.savefig('plottings_combined/training_progress.png')
 
-    print("\nEvaluating model predictions...")
-    metrics = evaluate_model(model, val_seq, val_labels)
+    print("\nCreating prediction visualizations...")
+    visualize_predictions(model, val_seq, val_labels)
+
+    print("\nAnalyzing predictions...")
+    gene_metrics = analyze_gene_predictions(model, val_seq, val_labels, dataset)
+    interaction_corr = analyze_interactions(model, val_seq, val_labels, dataset)
     
-    print("\nOverall Prediction Metrics:")
-    for metric_name, value in metrics['Overall'].items():
-        print(f"{metric_name}: {value:.4f}")
-    
-    
-   
+    print("\nPrediction Summary:")
+    print(f"Average Gene Correlation: {np.mean([m['Correlation'] for m in gene_metrics.values()]):.4f}")
+    print(f"Interaction Preservation: {interaction_corr:.4f}")
