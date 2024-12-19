@@ -20,14 +20,6 @@ def clean_gene_name(gene_name):
         return gene_name
     return gene_name.split('(')[0].strip()
 
-class CosineSimilarityLoss(nn.Module):
-    def __init__(self):
-        super(CosineSimilarityLoss, self).__init__()
-    
-    def forward(self, output, target):
-        cos_sim = F.cosine_similarity(output, target, dim=1)
-        return 1 - cos_sim.mean()
-
 class TemporalGraphDataset:
     def __init__(self, csv_file, embedding_dim=64, seq_len=10, pred_len=1):
         self.seq_len = seq_len
@@ -323,12 +315,12 @@ def train_model_with_early_stopping(model, train_sequences, train_labels,
     model.load_state_dict(torch.load('best_model.pth'))
     return train_losses, val_losses
 
-def train_model_with_cosine_similarity_and_early_stopping(
+def train_model_with_early_stopping_huber_loss(
     model, train_sequences, train_labels, val_sequences, val_labels, 
-    num_epochs=80, learning_rate=0.0001, threshold=1e-5, patience=10):
-    
+    num_epochs=80, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-5):
+   
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = CosineSimilarityLoss()
+    criterion = nn.HuberLoss(delta=delta)
     best_val_loss = float('inf')
     patience_counter = 0
     
@@ -366,24 +358,21 @@ def train_model_with_cosine_similarity_and_early_stopping(
         print(f'Training Loss: {train_loss:.4f}')
         print(f'Validation Loss: {val_loss:.4f}\n')
         
-        # Early stopping based on threshold
-        if val_loss < best_val_loss:
+        # Early stopping
+        if val_loss < best_val_loss - threshold:
             best_val_loss = val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), 'best_model.pth') 
-        elif abs(val_loss - best_val_loss) < threshold:
-            print("Early stopping triggered due to minimal loss improvement.")
-            break
+            torch.save(model.state_dict(), 'plottings_hubber_loss/best_model.pth') 
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print("Early stopping triggered due to lack of improvement.")
+                print("Early stopping triggered.")
                 break
     
-    model.load_state_dict(torch.load('best_model.pth'))
+    model.load_state_dict(torch.load('plottings_hubber_loss/best_model.pth'))
     return train_losses, val_losses
 
-def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_cosine_sim'):
+def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_hubber_loss'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
 
@@ -450,7 +439,7 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir
         
         return gene_metrics
 
-def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_cosine_sim'):
+def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_hubber_loss'):
     os.makedirs(save_dir, exist_ok=True)
     
     with torch.no_grad():
@@ -576,8 +565,9 @@ if __name__ == "__main__":
     #   model, train_seq, train_labels, val_seq, val_labels
     #)
 
-    train_losses, val_losses = train_model_with_cosine_similarity_and_early_stopping(
-        model, train_seq, train_labels, val_seq, val_labels
+    train_losses, val_losses = train_model_with_early_stopping_huber_loss(
+        model, train_seq, train_labels, val_seq, val_labels, 
+        num_epochs=100, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-5
     )
     
     plt.figure(figsize=(10, 6))
@@ -588,10 +578,10 @@ if __name__ == "__main__":
     plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_cosine_sim/training_progress.png')
+    plt.savefig('plottings_hubber_loss/training_progress.png')
 
-    print("\nCreating prediction visualizations...")
-    visualize_predictions(model, val_seq, val_labels)
+    #print("\nCreating prediction visualizations...")
+    #visualize_predictions(model, val_seq, val_labels)
 
     print("\nAnalyzing predictions...")
     gene_metrics = analyze_gene_predictions(model, val_seq, val_labels, dataset)
