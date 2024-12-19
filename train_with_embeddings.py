@@ -20,6 +20,14 @@ def clean_gene_name(gene_name):
         return gene_name
     return gene_name.split('(')[0].strip()
 
+class CosineSimilarityLoss(nn.Module):
+    def __init__(self):
+        super(CosineSimilarityLoss, self).__init__()
+    
+    def forward(self, output, target):
+        cos_sim = F.cosine_similarity(output, target, dim=1)
+        return 1 - cos_sim.mean()
+
 class TemporalGraphDataset:
     def __init__(self, csv_file, embedding_dim=64, seq_len=10, pred_len=1):
         self.seq_len = seq_len
@@ -315,7 +323,67 @@ def train_model_with_early_stopping(model, train_sequences, train_labels,
     model.load_state_dict(torch.load('best_model.pth'))
     return train_losses, val_losses
 
-def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_combined'):
+def train_model_with_cosine_similarity_and_early_stopping(
+    model, train_sequences, train_labels, val_sequences, val_labels, 
+    num_epochs=80, learning_rate=0.0001, threshold=1e-5, patience=10):
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = CosineSimilarityLoss()
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    train_losses = []
+    val_losses = []
+    
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        
+        for seq, label in zip(train_sequences, train_labels):
+            optimizer.zero_grad()
+            output = model(seq)
+            target = torch.stack([g.x for g in label]).mean(dim=0)
+            loss = criterion(output, target)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for seq, label in zip(val_sequences, val_labels):
+                output = model(seq)
+                target = torch.stack([g.x for g in label]).mean(dim=0)
+                val_loss += criterion(output, target).item()
+        
+        train_loss = total_loss / len(train_sequences)
+        val_loss = val_loss / len(val_sequences)
+        
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        
+        print(f'Epoch {epoch+1}/{num_epochs}')
+        print(f'Training Loss: {train_loss:.4f}')
+        print(f'Validation Loss: {val_loss:.4f}\n')
+        
+        # Early stopping based on threshold
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), 'best_model.pth') 
+        elif abs(val_loss - best_val_loss) < threshold:
+            print("Early stopping triggered due to minimal loss improvement.")
+            break
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered due to lack of improvement.")
+                break
+    
+    model.load_state_dict(torch.load('best_model.pth'))
+    return train_losses, val_losses
+
+def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_cosine_sim'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
 
@@ -382,7 +450,7 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir
         
         return gene_metrics
 
-def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_combined'):
+def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_cosine_sim'):
     os.makedirs(save_dir, exist_ok=True)
     
     with torch.no_grad():
@@ -508,7 +576,7 @@ if __name__ == "__main__":
     #   model, train_seq, train_labels, val_seq, val_labels
     #)
 
-    train_losses, val_losses = train_model_with_early_stopping(
+    train_losses, val_losses = train_model_with_cosine_similarity_and_early_stopping(
         model, train_seq, train_labels, val_seq, val_labels
     )
     
@@ -520,7 +588,7 @@ if __name__ == "__main__":
     plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_combined/training_progress.png')
+    plt.savefig('plottings_cosine_sim/training_progress.png')
 
     print("\nCreating prediction visualizations...")
     visualize_predictions(model, val_seq, val_labels)
