@@ -12,7 +12,8 @@ import os
 import seaborn as sns
 from node2vec import Node2Vec
 from scipy.stats import pearsonr
-from models import BaseSTGCN, EnhancedSTGCN
+from models import BaseSTGCN, EnhancedSTGCN, AttentionSTGCN
+import numpy as np
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -223,7 +224,7 @@ def train_model(model, train_sequences, train_labels, val_sequences, val_labels,
 
 def train_model_with_early_stopping_combined_loss(
     model, train_sequences, train_labels, val_sequences, val_labels, 
-    num_epochs=80, learning_rate=0.00005, patience=10, delta=1.0, threshold=1e-4):
+    num_epochs=50, learning_rate=0.00007, patience=10, delta=1.0, threshold=1e-4):
    
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = CombinedLoss(alpha=0.6, beta=0.4)
@@ -268,17 +269,17 @@ def train_model_with_early_stopping_combined_loss(
         if val_loss < best_val_loss - threshold:
             best_val_loss = val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), 'plottings_EnhancedSTGCN_combined_loss/best_model.pth') 
+            torch.save(model.state_dict(), 'plottings_AttentionSTGCN_combined_loss_layer_5_data_split_corrected/best_model.pth') 
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print("Early stopping triggered.")
                 break
     
-    model.load_state_dict(torch.load('plottings_EnhancedSTGCN_combined_loss/best_model.pth'))
+    model.load_state_dict(torch.load('plottings_AttentionSTGCN_combined_loss_layer_5_data_split_corrected/best_model.pth'))
     return train_losses, val_losses
 
-def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_EnhancedSTGCN_combined_loss'):
+def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir='plottings_AttentionSTGCN_combined_loss_layer_5_data_split_corrected'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
 
@@ -350,7 +351,7 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset, save_dir
         
         return gene_metrics, avg_corr
 
-def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_EnhancedSTGCN_combined_loss'):
+def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_AttentionSTGCN_combined_loss_layer_5_data_split_corrected'):
     os.makedirs(save_dir, exist_ok=True)
     
     with torch.no_grad():
@@ -383,7 +384,7 @@ def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='pl
         
         return interaction_corr
 
-def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_EnhancedSTGCN_combined_loss'):
+def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_AttentionSTGCN_combined_loss_layer_5_data_split_corrected'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     metrics = {}
@@ -459,6 +460,19 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_d
                         f.write(f"{metric}: {value}\n")
         
         return metrics
+def split_temporal_sequences(sequences, labels, train_size=0.8):
+    """
+    Split the temporal sequences into training and testing datasets while maintaining the sequential order.
+
+    """
+    split_index = int(len(sequences) * train_size)
+
+    train_seq = sequences[:split_index]
+    train_labels = labels[:split_index]
+    test_seq = sequences[split_index:]
+    test_labels = labels[split_index:]
+    
+    return train_seq, train_labels, test_seq, test_labels
 
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
@@ -470,16 +484,17 @@ if __name__ == "__main__":
     
     sequences, labels = dataset.get_temporal_sequences()
     
-    train_seq, val_seq, train_labels, val_labels = train_test_split(
-       sequences, labels, test_size=0.2, random_state=42
-    )
+    #train_seq, val_seq, train_labels, val_labels = train_test_split(
+    #   sequences, labels, test_size=0.2, random_state=42
+    #)
+    train_seq, train_labels, val_seq, val_labels = split_temporal_sequences(sequences, labels, train_size=0.8)
     
-    model = EnhancedSTGCN(
+    model = AttentionSTGCN(
     num_nodes=dataset.num_nodes,
     in_channels=64,
     hidden_channels=32,
     out_channels=64,
-    num_layers=3
+    num_layers=5
 )
     
     #train_losses, val_losses = train_model(
@@ -498,7 +513,7 @@ if __name__ == "__main__":
     plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_EnhancedSTGCN_combined_loss/training_progress.png')
+    plt.savefig('plottings_AttentionSTGCN_combined_loss_layer_5_data_split_corrected/training_progress.png')
 
     print("\nAnalyzing predictions...")
     gene_metrics, avg_corr = analyze_gene_predictions(model, val_seq, val_labels, dataset)
