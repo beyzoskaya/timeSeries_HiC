@@ -98,45 +98,13 @@ class TemporalGraphDataset:
         return G
     
     def create_temporal_node_features(self):
-        """Create node features that incorporate temporal information"""
-
-        """
-        Normalized values are not look good to me soo I decided to get all the expression values first from raw data then normalize
-        """
-        all_expr_values = []
-        for t in self.time_points:
-            for gene in self.node_map.keys():
-                gene_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
-                if len(gene_expr) == 0:
-                    gene_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
-                if len(gene_expr) > 0:
-                    all_expr_values.append(gene_expr[0])
-    
-        # Calculate normalization parameters
-        expr_mean = np.mean(all_expr_values)
-        expr_std = np.std(all_expr_values)
-        print(f"Expression statistics - Mean: {expr_mean:.4f}, Std: {expr_std:.4f}")
-
+        """Create node features that incorporate temporal information using raw expression values"""
         temporal_features = {}
-        print("Expression value ranges:")
-        for t in self.time_points[:3]:  # debugging for the mean actual labels
-            gene_expr = self.df[f'Gene1_Time_{t}'].describe()
-            print(f"Time {t}:")
-            print(gene_expr)
-
-        # normalize expressions to see labels more accurate
-        expr_values = []
-        for t in self.time_points:
-            expr_values.extend(self.df[f'Gene1_Time_{t}'].values)
-            expr_values.extend(self.df[f'Gene2_Time_{t}'].values)
         
-        expr_mean = np.mean(expr_values)
-        expr_std = np.std(expr_values)
-            
         # Create node2vec model using base graph
         node2vec = Node2Vec(
             self.base_graph,
-            dimensions=self.embedding_dim // 2,  # Use half dims for structural features
+            dimensions=self.embedding_dim // 2,  # Half dims for structural features
             walk_length=10,
             num_walks=80,
             workers=1,
@@ -147,36 +115,51 @@ class TemporalGraphDataset:
         
         # Get structural embeddings
         structural_model = node2vec.fit(window=10, min_count=1)
-        structural_embeddings = {gene: torch.tensor(structural_model.wv[gene]) 
-                               for gene in self.node_map.keys()}
+        structural_embeddings = {gene: torch.tensor(structural_model.wv[gene], dtype=torch.float32) 
+                            for gene in self.node_map.keys()}
         
-        # Combine structural embeddings with temporal features but using raw data's mean and stdev
+        # Print some statistics about structural embeddings
+        print("\nStructural embedding statistics:")
+        all_struct_values = torch.stack(list(structural_embeddings.values()))
+        print(f"Structural mean: {all_struct_values.mean():.4f}")
+        print(f"Structural std: {all_struct_values.std():.4f}")
+        
+        # Combine structural embeddings with raw temporal features
         for t in self.time_points:
             features = []
             for gene in self.node_map.keys():
+                # Get raw expression values
                 gene_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
                 if len(gene_expr) == 0:
                     gene_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
                 
-                if len(gene_expr) > 0:
-                    expr_value = (gene_expr[0] - expr_mean) / expr_std
-                else:
-                    expr_value = 0.0
-                    
-                # Store original value for validation
-                if t == self.time_points[0]:
-                    print(f"Gene {gene} - Original: {gene_expr[0] if len(gene_expr) > 0 else 0.0:.4f}, "
-                        f"Normalized: {expr_value:.4f}")
-                    
+                # Use raw expression value
+                expr_value = gene_expr[0] if len(gene_expr) > 0 else 0.0
+                
+                # Optional: Print first few values to verify
+                if t == self.time_points[0] and len(features) < 5:
+                    print(f"Gene {gene} - Raw expression value: {expr_value:.4f}")
+                
+                # Convert to tensor and repeat to match structural embedding dimension
                 expr_tensor = torch.tensor([expr_value], dtype=torch.float32)
+                
+                # Combine features
                 combined_feature = torch.cat([
                     structural_embeddings[gene],
-                    expr_tensor.repeat(self.embedding_dim // 2)
+                    expr_tensor.repeat(self.embedding_dim // 2)  # Repeat to match dimensions
                 ])
                 features.append(combined_feature)
-                
+            
             temporal_features[t] = torch.stack(features)
-    
+            
+            # Print statistics for first time point
+            if t == self.time_points[0]:
+                print(f"\nFeature statistics for time {t}:")
+                print(f"Mean: {temporal_features[t].mean():.4f}")
+                print(f"Std: {temporal_features[t].std():.4f}")
+                print(f"Min: {temporal_features[t].min():.4f}")
+                print(f"Max: {temporal_features[t].max():.4f}")
+        
         return temporal_features
     
     def get_edge_index_and_attr(self):
@@ -292,6 +275,14 @@ def train_model_with_early_stopping_combined_loss(
     
     save_dir = 'plottings_AttengionSTGCN_one_graph'
     os.makedirs(save_dir, exist_ok=True)
+
+    print("\nChecking data ranges before training:")
+    for i, (seq, label) in enumerate(zip(train_sequences[:1], train_labels[:1])):
+        print(f"\nSequence {i} stats:")
+        seq_data = torch.stack([g.x for g in seq])
+        label_data = torch.stack([g.x for g in label])
+        print(f"Input range: [{seq_data.min():.4f}, {seq_data.max():.4f}]")
+        print(f"Label range: [{label_data.min():.4f}, {label_data.max():.4f}]")
     
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = CombinedLoss(alpha=0.6, beta=0.4)
