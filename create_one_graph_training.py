@@ -99,8 +99,40 @@ class TemporalGraphDataset:
     
     def create_temporal_node_features(self):
         """Create node features that incorporate temporal information"""
+
+        """
+        Normalized values are not look good to me soo I decided to get all the expression values first from raw data then normalize
+        """
+        all_expr_values = []
+        for t in self.time_points:
+            for gene in self.node_map.keys():
+                gene_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                if len(gene_expr) == 0:
+                    gene_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                if len(gene_expr) > 0:
+                    all_expr_values.append(gene_expr[0])
+    
+        # Calculate normalization parameters
+        expr_mean = np.mean(all_expr_values)
+        expr_std = np.std(all_expr_values)
+        print(f"Expression statistics - Mean: {expr_mean:.4f}, Std: {expr_std:.4f}")
+
         temporal_features = {}
+        print("Expression value ranges:")
+        for t in self.time_points[:3]:  # debugging for the mean actual labels
+            gene_expr = self.df[f'Gene1_Time_{t}'].describe()
+            print(f"Time {t}:")
+            print(gene_expr)
+
+        # normalize expressions to see labels more accurate
+        expr_values = []
+        for t in self.time_points:
+            expr_values.extend(self.df[f'Gene1_Time_{t}'].values)
+            expr_values.extend(self.df[f'Gene2_Time_{t}'].values)
         
+        expr_mean = np.mean(expr_values)
+        expr_std = np.std(expr_values)
+            
         # Create node2vec model using base graph
         node2vec = Node2Vec(
             self.base_graph,
@@ -118,25 +150,33 @@ class TemporalGraphDataset:
         structural_embeddings = {gene: torch.tensor(structural_model.wv[gene]) 
                                for gene in self.node_map.keys()}
         
-        # Combine structural embeddings with temporal features
+        # Combine structural embeddings with temporal features but using raw data's mean and stdev
         for t in self.time_points:
             features = []
             for gene in self.node_map.keys():
-                # Get expression values for current time point
                 gene_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
                 if len(gene_expr) == 0:
                     gene_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
-                expr_value = torch.tensor([gene_expr[0]] if len(gene_expr) > 0 else [0.0], dtype=torch.float32) # convert expressions of genes to float
                 
-                # Combine structural and temporal features
+                if len(gene_expr) > 0:
+                    expr_value = (gene_expr[0] - expr_mean) / expr_std
+                else:
+                    expr_value = 0.0
+                    
+                # Store original value for validation
+                if t == self.time_points[0]:
+                    print(f"Gene {gene} - Original: {gene_expr[0] if len(gene_expr) > 0 else 0.0:.4f}, "
+                        f"Normalized: {expr_value:.4f}")
+                    
+                expr_tensor = torch.tensor([expr_value], dtype=torch.float32)
                 combined_feature = torch.cat([
                     structural_embeddings[gene],
-                    expr_value.repeat(self.embedding_dim // 2)  # Repeat to match dimensions
+                    expr_tensor.repeat(self.embedding_dim // 2)
                 ])
                 features.append(combined_feature)
-            
+                
             temporal_features[t] = torch.stack(features)
-        
+    
         return temporal_features
     
     def get_edge_index_and_attr(self):
@@ -168,23 +208,72 @@ class TemporalGraphDataset:
         """Create temporal sequences for training"""
         sequences = []
         labels = []
+
+        print("\nTime points being used:")
+        print(f"All time points: {self.time_points}")
         
         for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
             seq_graphs = [self.get_pyg_graph(t) for t in self.time_points[i:i+self.seq_len]]
             label_graphs = [self.get_pyg_graph(t) for t in 
                           self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]]
             
+            #input_times = self.time_points[i:i+self.seq_len]
+            target_times = self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]
+            
             if i == 0:
                 print("\nSequence information:")
                 print(f"Input time points: {self.time_points[i:i+self.seq_len]}")
                 print(f"Target time points: {self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]}")
                 print(f"Feature dimension: {seq_graphs[0].x.shape[1]}")
+
+                # debugging for gene values
+                label_tensor = torch.stack([g.x for g in label_graphs]).mean(dim=0)
+                genes = list(self.node_map.keys())
+                print("\nSample label values for first 5 genes:")
+                for idx in range(min(5, len(genes))):
+                    gene = genes[idx]
+                    value = label_tensor[idx]
+                    print(f"{gene}: {value.mean().item():.4f}")
+                
+                # Check raw expression values
+                print("\nRaw expression values for first gene:")
+                first_gene = genes[0]
+                for t in target_times:
+                    expr = self.df[self.df['Gene1_clean'] == first_gene][f'Gene1_Time_{t}'].values
+                    if len(expr) == 0:
+                        expr = self.df[self.df['Gene2_clean'] == first_gene][f'Gene2_Time_{t}'].values
+                    print(f"Time {t}: {expr[0] if len(expr) > 0 else 'Not found'}")
             
             sequences.append(seq_graphs)
             labels.append(label_graphs)
         
         print(f"\nCreated {len(sequences)} sequences")
         return sequences, labels
+
+def analyze_label_distribution(model, val_sequences, val_labels, dataset):
+    """Analyze the distribution of label values"""
+    print("\nAnalyzing label value distribution...")
+    
+    all_labels = []
+    for label_seq in val_labels:
+        label_tensor = torch.stack([g.x for g in label_seq]).mean(dim=0)
+        all_labels.append(label_tensor.numpy())
+    
+    all_labels = np.concatenate(all_labels, axis=0)
+    
+    print(f"Label statistics:")
+    print(f"Mean: {np.mean(all_labels):.4f}")
+    print(f"Std: {np.std(all_labels):.4f}")
+    print(f"Min: {np.min(all_labels):.4f}")
+    print(f"Max: {np.max(all_labels):.4f}")
+    
+    plt.figure(figsize=(10, 6))
+    plt.hist(all_labels.flatten(), bins=50)
+    plt.title("Distribution of Label Values")
+    plt.xlabel("Value")
+    plt.ylabel("Frequency")
+    plt.savefig(f'plottings_AttengionSTGCN_one_graph/label_distribution.png')
+    plt.close()
 
 def split_temporal_sequences(sequences, labels, train_size=0.8):
     """Split sequences while maintaining temporal order"""
@@ -199,7 +288,7 @@ def split_temporal_sequences(sequences, labels, train_size=0.8):
 
 def train_model_with_early_stopping_combined_loss(
     model, train_sequences, train_labels, val_sequences, val_labels, 
-    num_epochs=50, learning_rate=0.00007, patience=10, delta=1.0, threshold=1e-4):
+    num_epochs=100, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-4):
     
     save_dir = 'plottings_AttengionSTGCN_one_graph'
     os.makedirs(save_dir, exist_ok=True)
@@ -220,6 +309,13 @@ def train_model_with_early_stopping_combined_loss(
             optimizer.zero_grad()
             output = model(seq)
             target = torch.stack([g.x for g in label]).mean(dim=0)
+
+            if epoch % 5 == 0:
+                print(f"\nTarget statistics:")
+                print(f"Mean: {target.mean().item():.4f}")
+                print(f"Std: {target.std().item():.4f}")
+                print(f"Min: {target.min().item():.4f}")
+                print(f"Max: {target.max().item():.4f}")
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
@@ -507,6 +603,8 @@ if __name__ == "__main__":
     train_labels = convert_sequences_to_float32(train_labels)
     val_seq = convert_sequences_to_float32(val_seq)
     val_labels = convert_sequences_to_float32(val_labels)
+
+    analyze_label_distribution(model, val_seq, val_labels, dataset) # analyze labels before training!
 
     train_losses, val_losses = train_model_with_early_stopping_combined_loss(
         model, train_seq, train_labels, val_seq, val_labels
