@@ -243,7 +243,10 @@ class TemporalGraphDataset:
                 print(f"Feature dimension: {seq_graphs[0].x.shape[1]}")
 
                 # debugging for gene values
-                label_tensor = torch.stack([g.x for g in label_graphs]).mean(dim=0)
+                #label_tensor = torch.stack([g.x for g in label_graphs]).mean(dim=0)
+                label_tensor = torch.stack([g.x for g in label_graphs]).squeeze(dim=0) # Instead of mean, I directly squeeze the dim
+                print(f" Label tensor: {label_tensor}")
+                print(f" Label tensor shape: {label_tensor.shape}") # [1, 52, 32] without mean(dim=0)--> with dim=0 [52, 32] 
                 genes = list(self.node_map.keys())
                 print("\nSample label values for first 5 genes:")
                 for idx in range(min(5, len(genes))):
