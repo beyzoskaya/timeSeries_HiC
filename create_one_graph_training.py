@@ -75,7 +75,10 @@ class ExpressionSensitiveLoss(nn.Module):
         )
         
         return total_loss
-
+"""
+number of nodes in the graph. 52
+43 time points
+"""
 class TemporalGraphDataset:
     def __init__(self, csv_file, embedding_dim=64, seq_len=5, pred_len=1): # I change the seq_len to more lower value
         self.seq_len = seq_len
@@ -245,8 +248,8 @@ class TemporalGraphDataset:
                 # debugging for gene values
                 #label_tensor = torch.stack([g.x for g in label_graphs]).mean(dim=0)
                 label_tensor = torch.stack([g.x for g in label_graphs]).squeeze(dim=0) # Instead of mean, I directly squeeze the dim
-                print(f" Label tensor: {label_tensor}")
-                print(f" Label tensor shape: {label_tensor.shape}") # [1, 52, 32] without mean(dim=0)--> with dim=0 [52, 32] 
+                #print(f" Label tensor: {label_tensor}")
+                #print(f" Label tensor shape: {label_tensor.shape}") # [1, 52, 32] without mean(dim=0)--> with dim=0 [52, 32] 
                 genes = list(self.node_map.keys())
                 print("\nSample label values for first 5 genes:")
                 for idx in range(min(5, len(genes))):
@@ -265,8 +268,21 @@ class TemporalGraphDataset:
             
             sequences.append(seq_graphs)
             labels.append(label_graphs)
+            print(f"Labels: {labels}")
         
         print(f"\nCreated {len(sequences)} sequences")
+
+        """
+        Created sequence for times: [16.0, 17.0, 18.0, 19.0, 20.0] with targets: [21.0]
+        Created sequence for times: [17.0, 18.0, 19.0, 20.0, 21.0] with targets: [22.0]
+        Created sequence for times: [18.0, 19.0, 20.0, 21.0, 22.0] with targets: [23.0]
+        Created sequence for times: [19.0, 20.0, 21.0, 22.0, 23.0] with targets: [24.0]
+        Created sequence for times: [20.0, 21.0, 22.0, 23.0, 24.0] with targets: [25.0]
+        Created sequence for times: [21.0, 22.0, 23.0, 24.0, 25.0] with targets: [26.0]
+        Created sequence for times: [22.0, 23.0, 24.0, 25.0, 26.0] with targets: [27.0]
+        Created sequence for times: [23.0, 24.0, 25.0, 26.0, 27.0] with targets: [28.0]
+        """
+
         return sequences, labels
 
 def analyze_label_distribution(model, val_sequences, val_labels, dataset):
@@ -275,7 +291,8 @@ def analyze_label_distribution(model, val_sequences, val_labels, dataset):
     
     all_labels = []
     for label_seq in val_labels:
-        label_tensor = torch.stack([g.x for g in label_seq]).mean(dim=0)
+        #label_tensor = torch.stack([g.x for g in label_seq]).mean(dim=0)
+        label_tensor = torch.stack([g.x for g in label_seq]).squeeze(dim=0)
         all_labels.append(label_tensor.numpy())
     
     all_labels = np.concatenate(all_labels, axis=0)
@@ -299,8 +316,10 @@ def split_temporal_sequences(sequences, labels, train_size=0.8):
     split_index = int(len(sequences) * train_size)
     
     train_seq = sequences[:split_index]
+    print(f" Length of train_seq: {len(train_seq)}")
     train_labels = labels[:split_index]
     test_seq = sequences[split_index:]
+    print(f" Length of test_seq: {len(test_seq)}")
     test_labels = labels[split_index:]
     
     return train_seq, train_labels, test_seq, test_labels
@@ -335,7 +354,7 @@ def train_model_with_early_stopping_combined_loss(
         for seq, label in zip(train_sequences, train_labels):
             optimizer.zero_grad()
             output = model(seq)
-            target = torch.stack([g.x for g in label]).mean(dim=0)
+            target = torch.stack([g.x for g in label]).squeeze(dim=0) # remove mean
 
             #if epoch % 5 == 0:
             #    print(f"\nTarget statistics:")
@@ -353,7 +372,8 @@ def train_model_with_early_stopping_combined_loss(
         with torch.no_grad():
             for seq, label in zip(val_sequences, val_labels):
                 output = model(seq)
-                target = torch.stack([g.x for g in label]).mean(dim=0)
+                #target = torch.stack([g.x for g in label]).mean(dim=0)
+                target = torch.stack([g.x for g in label]).squeeze(dim=0)
                 val_loss += criterion(output, target).item()
         
         train_loss = total_loss / len(train_sequences)
@@ -404,7 +424,8 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset,
         
         for seq, label in zip(val_sequences, val_labels):
             pred = model(seq)
-            target = torch.stack([g.x for g in label]).mean(dim=0)
+            #target = torch.stack([g.x for g in label]).mean(dim=0)
+            target = torch.stack([g.x for g in label]).squeeze(dim=0)
             all_predictions.append(pred.numpy())
             all_targets.append(target.numpy())
         
@@ -466,7 +487,8 @@ def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='pl
     
     with torch.no_grad():
         pred = model(val_sequences[0])
-        target = torch.stack([g.x for g in val_labels[0]]).mean(dim=0)
+        #target = torch.stack([g.x for g in val_labels[0]]).mean(dim=0)
+        target = torch.stack([g.x for g in val_labels[0]]).squeeze(dim=0)
         
         pred_np = pred.numpy()
         target_np = target.numpy()
@@ -517,7 +539,8 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_
         
         for seq, label in zip(val_sequences, val_labels):
             pred = model(seq)
-            target = torch.stack([g.x for g in label]).mean(dim=0)
+            #target = torch.stack([g.x for g in label]).mean(dim=0)
+            target = torch.stack([g.x for g in label]).squeeze(dim=0)
             all_predictions.append(pred.numpy())
             all_targets.append(target.numpy())
         
@@ -538,7 +561,9 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_
         
         for i, gene in enumerate(genes):
             gene_pred = predictions[:, i, :]
+            #print(f"gene_pred.shape: {gene_pred.shape}")
             gene_target = targets[:, i, :]
+            #print(f"gene_target.shape: {gene_target.shape}")
             corr = pearsonr(gene_pred.flatten(), gene_target.flatten())[0]
             gene_correlations.append(corr)
             
@@ -582,7 +607,7 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_
                         f.write(f"{metric}: {value}\n")
         
         return metrics
-
+    
 def analyze_predictions_example(model, val_sequences, val_labels, dataset, save_dir='plottings_TGCNModel_one_graph'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
@@ -595,7 +620,8 @@ def analyze_predictions_example(model, val_sequences, val_labels, dataset, save_
         example_label = val_labels[0]
         
         prediction = model(example_seq)
-        target = torch.stack([g.x for g in example_label]).mean(dim=0)
+        #target = torch.stack([g.x for g in example_label]).mean(dim=0)
+        target = torch.stack([g.x for g in example_label]).squeeze(dim=0)
         
         print(f"Single prediction shape: {prediction.shape}")
         print(f"Single target shape: {target.shape}")
@@ -651,7 +677,7 @@ if __name__ == "__main__":
     dataset = TemporalGraphDataset(
         csv_file='mapped/enhanced_interactions.csv',
         embedding_dim=32,
-        seq_len=10,
+        seq_len=5,
         pred_len=1
     )
     
@@ -698,7 +724,7 @@ if __name__ == "__main__":
     train_losses, val_losses = train_model_with_early_stopping_combined_loss(
         model, train_seq, train_labels, val_seq, val_labels
     )
-    
+
     plt.figure(figsize=(10, 6))
     plt.plot(train_losses, label='Training Loss')
     plt.plot(val_losses, label='Validation Loss')
