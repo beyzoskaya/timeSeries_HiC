@@ -19,6 +19,57 @@ def clean_gene_name(gene_name):
         return gene_name
     return gene_name.split('(')[0].strip()
 
+################# Analyze Data ######################
+def analyze_label_structure(val_sequences, val_labels):
+    """Analyze the structure of sequences and labels"""
+    print("\n=== Label Structure Analysis ===")
+    
+    # Look at first sequence and label
+    seq = val_sequences[0]
+    label = val_labels[0]
+    
+    print("\nSequence structure:")
+    print(f"Number of graphs in sequence: {len(seq)}")
+    print(f"First graph features shape: {seq[0].x.shape}")
+    print(f"Edge index shape: {seq[0].edge_index.shape}")
+    
+    print("\nLabel structure:")
+    print(f"Number of graphs in label: {len(label)}")
+    print(f"Label features shape: {label[0].x.shape}")
+    
+    # Look at actual values
+    print("\nExample values for first node:")
+    print("Sequence feature values:")
+    for i, g in enumerate(seq):
+        print(f"Time step {i}: {g.x[0, :5]}")  # First node, first 5 features
+    
+    print("\nLabel feature values:")
+    print(f"Target: {label[0].x[0, :5]}")  # First node, first 5 features
+    
+    return seq[0].x.shape, label[0].x.shape
+
+def get_raw_predictions(model, val_sequences, val_labels):
+    """Get predictions without any averaging"""
+    model.eval()
+    with torch.no_grad():
+        # Get one sequence prediction
+        seq = val_sequences[0]
+        label = val_labels[0]
+        
+        # Get prediction
+        pred = model(seq)
+        target = label[0].x  # Direct access without mean
+        
+        print("\n=== Prediction Analysis ===")
+        print(f"Raw prediction shape: {pred.shape}")
+        print(f"Raw target shape: {target.shape}")
+        
+        print("\nFirst node values:")
+        print(f"Predicted: {pred[0, :5]}")  # First node, first 5 features
+        print(f"Target: {target[0, :5]}")   # First node, first 5 features
+        
+        return pred, target
+
 class CombinedLoss(nn.Module):
     def __init__(self, alpha=0.6, beta=0.4):
         super(CombinedLoss, self).__init__()
@@ -608,53 +659,70 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_
         
         return metrics
     
-def analyze_predictions_example(model, val_sequences, val_labels, dataset, save_dir='plottings_TGCNModel_one_graph'):
+def evaluate_model_with_direct_values(model, val_sequences, val_labels, dataset, save_dir='plottings_TGCN_direct'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     
-    print("\nAnalyzing predictions structure:")
+    # Target times for predictions
+    target_times = [21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0]
     
     with torch.no_grad():
-        # Get one sequence prediction
-        example_seq = val_sequences[0]
-        example_label = val_labels[0]
+        all_predictions = []
+        all_targets = []
         
-        prediction = model(example_seq)
-        #target = torch.stack([g.x for g in example_label]).mean(dim=0)
-        target = torch.stack([g.x for g in example_label]).squeeze(dim=0)
+        # Get predictions without averaging
+        for seq, label in zip(val_sequences, val_labels):
+            pred = model(seq)
+            target = label[0].x  # Direct access to features
+            all_predictions.append(pred.numpy())
+            all_targets.append(target.numpy())
+            
+            # Print shapes for debugging
+            print(f"\nPrediction shape: {pred.shape}")
+            print(f"Target shape: {target.shape}")
         
-        print(f"Single prediction shape: {prediction.shape}")
-        print(f"Single target shape: {target.shape}")
+        # Stack predictions and targets
+        predictions = np.stack(all_predictions)
+        targets = np.stack(all_targets)
         
-        # Let's look at first gene's values
+        # Plot for each gene
         genes = list(dataset.node_map.keys())
-        first_gene = genes[0]
-        
-        print(f"\nFirst gene ({first_gene}) prediction values:")
-        print(prediction[0, :5])  # First 5 values
-        print(f"\nFirst gene ({first_gene}) target values:")
-        print(target[0, :5])  # First 5 values
-        
-        # Try plotting just first feature over time for each gene
-        plt.figure(figsize=(12, 6))
-        
-        # Plot for first gene
-        gene_pred = prediction[0, 1].item()  # First gene, first feature
-        gene_target = target[0, 1].item()    # First gene, first feature
-        
-        plt.scatter([22], [gene_pred], color='red', label='Predicted')
-        plt.scatter([22], [gene_target], color='blue', label='Actual')
-        
-        plt.title(f'Gene: {first_gene} - First Feature Value')
-        plt.xlabel('Time Point')
-        plt.ylabel('Value')
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(os.path.join(save_dir, 'example_prediction_feature_2.png'))
-        plt.close()
-        
-        print("\nSaved example prediction plot.")
-        return prediction, target
+        for i, gene in enumerate(genes):
+            # Get gene's predictions and targets
+            # Use first feature column for plotting
+            gene_pred = predictions[:, i, 0]  # [num_sequences]
+            gene_target = targets[:, i, 0]    # [num_sequences]
+            
+            plt.figure(figsize=(12, 6))
+            
+            # Plot with actual time points
+            plt.plot(target_times, gene_target, 'bo-', label='Actual', markersize=8)
+            plt.plot(target_times, gene_pred, 'ro--', label='Predicted', markersize=8)
+            
+            plt.title(f'Gene: {gene}')
+            plt.xlabel('Time Points')
+            plt.ylabel('Expression Value')
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            
+            # Add value labels
+            for t, pred, actual in zip(target_times, gene_pred, gene_target):
+                plt.annotate(f'{actual:.2f}', (t, actual),
+                           textcoords="offset points", xytext=(0,10),
+                           ha='center', color='blue')
+                plt.annotate(f'{pred:.2f}', (t, pred),
+                           textcoords="offset points", xytext=(0,-15),
+                           ha='center', color='red')
+            
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, f'{gene}_prediction.png'), dpi=300)
+            plt.close()
+            
+            if i == 0:
+                print(f"\nValues for gene {gene}:")
+                print("Time points:", target_times)
+                print("Predicted:", gene_pred)
+                print("Actual:", gene_target)
     
 def split_temporal_sequences(sequences, labels, train_size=0.8):
     """Split sequences while maintaining temporal order and return indices"""
@@ -725,6 +793,15 @@ if __name__ == "__main__":
         model, train_seq, train_labels, val_seq, val_labels
     )
 
+    print("\nAnalyzing data structure...")
+    seq_shape, label_shape = analyze_label_structure(val_seq, val_labels)
+    
+    print("\nGetting raw predictions...")
+    pred, target = get_raw_predictions(model, val_seq, val_labels)
+
+    print("\nEvaluating model with direct values...")
+    evaluate_model_with_direct_values(model, val_seq, val_labels, dataset)
+
     plt.figure(figsize=(10, 6))
     plt.plot(train_losses, label='Training Loss')
     plt.plot(val_losses, label='Validation Loss')
@@ -735,12 +812,10 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.savefig('plottings_TGCNModel_one_graph/training_progress.png')
 
-    print("\nAnalyzing predictions...")
-    gene_metrics, avg_corr = analyze_gene_predictions(model, val_seq, val_labels, dataset)
+    #print("\nAnalyzing predictions...")
+    #gene_metrics, avg_corr = analyze_gene_predictions(model, val_seq, val_labels, dataset)
     interaction_corr = analyze_interactions(model, val_seq, val_labels, dataset)
-    prediction, target = analyze_predictions_example(model,val_seq, val_labels, dataset)
-
-
+    
     #print("\nPrediction Summary:")
     #print(f"Average Gene Correlation: {np.mean([m['Correlation'] for m in gene_metrics.values()]):.4f}")
     print(f"Interaction Preservation: {interaction_corr:.4f}")
