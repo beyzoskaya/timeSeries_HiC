@@ -288,7 +288,7 @@ def analyze_label_distribution(model, val_sequences, val_labels, dataset):
     plt.title("Distribution of Label Values")
     plt.xlabel("Value")
     plt.ylabel("Frequency")
-    plt.savefig(f'plottings_STGCNModel_one_graph/label_distribution.png')
+    plt.savefig(f'plottings_TGCNModel_one_graph/label_distribution.png')
     plt.close()
 
 def split_temporal_sequences(sequences, labels, train_size=0.8):
@@ -306,7 +306,7 @@ def train_model_with_early_stopping_combined_loss(
     model, train_sequences, train_labels, val_sequences, val_labels, 
     num_epochs=100, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-4):
     
-    save_dir = 'plottings_STGCNModel_one_graphh'
+    save_dir = 'plottings_TGCNModel_one_graph'
     os.makedirs(save_dir, exist_ok=True)
 
     print("\nChecking data ranges before training:")
@@ -391,7 +391,7 @@ def train_model_with_early_stopping_combined_loss(
     return train_losses, val_losses
 
 def analyze_gene_predictions(model, val_sequences, val_labels, dataset, 
-                           save_dir='plottings_STGCNModel_one_graph'):
+                           save_dir='plottings_TGCNModel_one_graph'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     
@@ -458,7 +458,7 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset,
         
     return gene_metrics, avg_corr
 
-def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCNModel_one_graph'):
+def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_TGCNModel_one_graph'):
     os.makedirs(save_dir, exist_ok=True)
     
     with torch.no_grad():
@@ -491,7 +491,7 @@ def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='pl
         
         return interaction_corr
 
-def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_index, save_dir='plottings_STGCNModel_one_graph'):
+def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_index, save_dir='plottings_TGCNModel_one_graph'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     metrics = {}
@@ -579,6 +579,54 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_
                         f.write(f"{metric}: {value}\n")
         
         return metrics
+
+def analyze_predictions_example(model, val_sequences, val_labels, dataset, save_dir='plottings_TGCNModel_one_graph'):
+    os.makedirs(save_dir, exist_ok=True)
+    model.eval()
+    
+    print("\nAnalyzing predictions structure:")
+    
+    with torch.no_grad():
+        # Get one sequence prediction
+        example_seq = val_sequences[0]
+        example_label = val_labels[0]
+        
+        prediction = model(example_seq)
+        target = torch.stack([g.x for g in example_label]).mean(dim=0)
+        
+        print(f"Single prediction shape: {prediction.shape}")
+        print(f"Single target shape: {target.shape}")
+        
+        # Let's look at first gene's values
+        genes = list(dataset.node_map.keys())
+        first_gene = genes[0]
+        
+        print(f"\nFirst gene ({first_gene}) prediction values:")
+        print(prediction[0, :5])  # First 5 values
+        print(f"\nFirst gene ({first_gene}) target values:")
+        print(target[0, :5])  # First 5 values
+        
+        # Try plotting just first feature over time for each gene
+        plt.figure(figsize=(12, 6))
+        
+        # Plot for first gene
+        gene_pred = prediction[0, 1].item()  # First gene, first feature
+        gene_target = target[0, 1].item()    # First gene, first feature
+        
+        plt.scatter([22], [gene_pred], color='red', label='Predicted')
+        plt.scatter([22], [gene_target], color='blue', label='Actual')
+        
+        plt.title(f'Gene: {first_gene} - First Feature Value')
+        plt.xlabel('Time Point')
+        plt.ylabel('Value')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(save_dir, 'example_prediction_feature_2.png'))
+        plt.close()
+        
+        print("\nSaved example prediction plot.")
+        return prediction, target
+    
 def split_temporal_sequences(sequences, labels, train_size=0.8):
     """Split sequences while maintaining temporal order and return indices"""
     split_index = int(len(sequences) * train_size)
@@ -656,12 +704,14 @@ if __name__ == "__main__":
     plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_STGCNModel_one_graph/training_progress.png')
+    plt.savefig('plottings_TGCNModel_one_graph/training_progress.png')
 
     print("\nAnalyzing predictions...")
     gene_metrics, avg_corr = analyze_gene_predictions(model, val_seq, val_labels, dataset)
     interaction_corr = analyze_interactions(model, val_seq, val_labels, dataset)
-    
+    prediction, target = analyze_predictions_example(model,val_seq, val_labels, dataset)
+
+
     #print("\nPrediction Summary:")
     #print(f"Average Gene Correlation: {np.mean([m['Correlation'] for m in gene_metrics.values()]):.4f}")
     print(f"Interaction Preservation: {interaction_corr:.4f}")
