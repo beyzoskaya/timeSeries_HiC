@@ -11,7 +11,7 @@ import os
 import seaborn as sns
 from node2vec import Node2Vec
 from scipy.stats import pearsonr
-from models import BaseSTGCN, EnhancedSTGCN, AttentionSTGCN
+from models import  AttentionSTGCN, STGCNModel,TGCNModel
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -43,8 +43,41 @@ class CombinedLoss(nn.Module):
         
         return self.alpha * (0.5 * mse_loss + 0.5 * huber_loss) + self.beta * corr_loss
 
+class ExpressionSensitiveLoss(nn.Module):
+    def __init__(self, trend_weight=0.3, magnitude_weight=0.3, correlation_weight=0.4):
+        super(ExpressionSensitiveLoss, self).__init__()
+        self.trend_weight = trend_weight
+        self.magnitude_weight = magnitude_weight
+        self.correlation_weight = correlation_weight
+        
+    def forward(self, pred, target):
+        pred_diff = pred[:, 1:] - pred[:, :-1]
+        target_diff = target[:, 1:] - target[:, :-1]
+        trend_loss = F.mse_loss(torch.sign(pred_diff), torch.sign(target_diff))
+      
+        magnitude_loss = torch.mean(torch.abs(
+            torch.log1p(torch.abs(pred)) - torch.log1p(torch.abs(target))
+        ))
+        
+        pred_flat = pred.view(-1)
+        target_flat = target.view(-1)
+        
+        vx = pred_flat - torch.mean(pred_flat)
+        vy = target_flat - torch.mean(target_flat)
+        
+        corr = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)) + 1e-12)
+        correlation_loss = 1 - corr
+        
+        total_loss = (
+            self.trend_weight * trend_loss + 
+            self.magnitude_weight * magnitude_loss + 
+            self.correlation_weight * correlation_loss
+        )
+        
+        return total_loss
+
 class TemporalGraphDataset:
-    def __init__(self, csv_file, embedding_dim=64, seq_len=10, pred_len=1):
+    def __init__(self, csv_file, embedding_dim=64, seq_len=5, pred_len=1): # I change the seq_len to more lower value
         self.seq_len = seq_len
         self.pred_len = pred_len
         self.embedding_dim = embedding_dim
@@ -153,12 +186,12 @@ class TemporalGraphDataset:
             temporal_features[t] = torch.stack(features)
             
             # Print statistics for first time point
-            if t == self.time_points[0]:
-                print(f"\nFeature statistics for time {t}:")
-                print(f"Mean: {temporal_features[t].mean():.4f}")
-                print(f"Std: {temporal_features[t].std():.4f}")
-                print(f"Min: {temporal_features[t].min():.4f}")
-                print(f"Max: {temporal_features[t].max():.4f}")
+            #if t == self.time_points[0]:
+            #    print(f"\nFeature statistics for time {t}:")
+            #    print(f"Mean: {temporal_features[t].mean():.4f}")
+            #    print(f"Std: {temporal_features[t].std():.4f}")
+            #    print(f"Min: {temporal_features[t].min():.4f}")
+            #    print(f"Max: {temporal_features[t].max():.4f}")
         
         return temporal_features
     
@@ -255,7 +288,7 @@ def analyze_label_distribution(model, val_sequences, val_labels, dataset):
     plt.title("Distribution of Label Values")
     plt.xlabel("Value")
     plt.ylabel("Frequency")
-    plt.savefig(f'plottings_AttengionSTGCN_one_graph/label_distribution.png')
+    plt.savefig(f'plottings_STGCNModel_one_graph/label_distribution.png')
     plt.close()
 
 def split_temporal_sequences(sequences, labels, train_size=0.8):
@@ -273,7 +306,7 @@ def train_model_with_early_stopping_combined_loss(
     model, train_sequences, train_labels, val_sequences, val_labels, 
     num_epochs=100, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-4):
     
-    save_dir = 'plottings_AttengionSTGCN_one_graph'
+    save_dir = 'plottings_STGCNModel_one_graphh'
     os.makedirs(save_dir, exist_ok=True)
 
     print("\nChecking data ranges before training:")
@@ -301,12 +334,12 @@ def train_model_with_early_stopping_combined_loss(
             output = model(seq)
             target = torch.stack([g.x for g in label]).mean(dim=0)
 
-            if epoch % 5 == 0:
-                print(f"\nTarget statistics:")
-                print(f"Mean: {target.mean().item():.4f}")
-                print(f"Std: {target.std().item():.4f}")
-                print(f"Min: {target.min().item():.4f}")
-                print(f"Max: {target.max().item():.4f}")
+            #if epoch % 5 == 0:
+            #    print(f"\nTarget statistics:")
+            #    print(f"Mean: {target.mean().item():.4f}")
+            #    print(f"Std: {target.std().item():.4f}")
+            #    print(f"Min: {target.min().item():.4f}")
+            #    print(f"Max: {target.max().item():.4f}")
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
@@ -358,7 +391,7 @@ def train_model_with_early_stopping_combined_loss(
     return train_losses, val_losses
 
 def analyze_gene_predictions(model, val_sequences, val_labels, dataset, 
-                           save_dir='plottings_AttengionSTGCN_one_graph'):
+                           save_dir='plottings_STGCNModel_one_graph'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     
@@ -425,7 +458,7 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset,
         
     return gene_metrics, avg_corr
 
-def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_AttengionSTGCN_one_graph'):
+def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCNModel_one_graph'):
     os.makedirs(save_dir, exist_ok=True)
     
     with torch.no_grad():
@@ -458,11 +491,23 @@ def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='pl
         
         return interaction_corr
 
-def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_AttengionSTGCN_one_graph'):
+def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_index, save_dir='plottings_STGCNModel_one_graph'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     metrics = {}
+   
+    time_points = dataset.time_points
+    seq_length = dataset.seq_len
+    start_idx = split_index + seq_length
+    prediction_times = time_points[start_idx:]
     
+    print("\nValidation Time Information:")
+    print(f"Original time points: {time_points}")
+    print(f"Split index: {split_index}")
+    print(f"Sequence length: {seq_length}")
+    print(f"Start index for predictions: {start_idx}")
+    print(f"Prediction times: {prediction_times}")
+
     with torch.no_grad():
         all_predictions = []
         all_targets = []
@@ -535,23 +580,26 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_d
         
         return metrics
 def split_temporal_sequences(sequences, labels, train_size=0.8):
-    """
-    Split the temporal sequences into training and testing datasets while maintaining the sequential order.
-
-    """
+    """Split sequences while maintaining temporal order and return indices"""
     split_index = int(len(sequences) * train_size)
+    
+    print("\nSplit Information:")
+    print(f"Total sequences: {len(sequences)}")
+    print(f"Split index: {split_index}")
+    print(f"Training sequences: {split_index}")
+    print(f"Validation sequences: {len(sequences) - split_index}")
 
     train_seq = sequences[:split_index]
     train_labels = labels[:split_index]
-    test_seq = sequences[split_index:]
-    test_labels = labels[split_index:]
-    
-    return train_seq, train_labels, test_seq, test_labels
+    val_seq = sequences[split_index:]
+    val_labels = labels[split_index:]
+
+    return train_seq, train_labels, val_seq, val_labels, split_index
 
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
         csv_file='mapped/enhanced_interactions.csv',
-        embedding_dim=64,
+        embedding_dim=32,
         seq_len=10,
         pred_len=1
     )
@@ -561,14 +609,13 @@ if __name__ == "__main__":
     #train_seq, val_seq, train_labels, val_labels = train_test_split(
     #   sequences, labels, test_size=0.2, random_state=42
     #)
-    train_seq, train_labels, val_seq, val_labels = split_temporal_sequences(sequences, labels, train_size=0.8)
+    train_seq, train_labels, val_seq, val_labels,split_index = split_temporal_sequences(sequences, labels, train_size=0.8)
     
-    model = AttentionSTGCN(
+    model = TGCNModel(
     num_nodes=dataset.num_nodes,
-    in_channels=64,
-    hidden_channels=32,
-    out_channels=64,
-    num_layers=5
+    in_channels=32,      # Must match embedding_dim which is 32
+    hidden_channels=64,
+    out_channels=32      # Match input dimension for consistency
 ).float() # convert model to float because I got type error
     
     #train_losses, val_losses = train_model(
@@ -609,7 +656,7 @@ if __name__ == "__main__":
     plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_AttengionSTGCN_one_graph/training_progress.png')
+    plt.savefig('plottings_STGCNModel_one_graph/training_progress.png')
 
     print("\nAnalyzing predictions...")
     gene_metrics, avg_corr = analyze_gene_predictions(model, val_seq, val_labels, dataset)
@@ -619,7 +666,7 @@ if __name__ == "__main__":
     #print(f"Average Gene Correlation: {np.mean([m['Correlation'] for m in gene_metrics.values()]):.4f}")
     print(f"Interaction Preservation: {interaction_corr:.4f}")
 
-    metrics = evaluate_model_performance(model, val_seq, val_labels, dataset)
+    metrics = evaluate_model_performance(model, val_seq, val_labels, dataset, split_index)
     print("\nModel Performance Summary:")
     print(f"Overall Pearson Correlation: {metrics['Overall']['Pearson_Correlation']:.4f}")
     print(f"RMSE: {metrics['Overall']['RMSE']:.4f}")
