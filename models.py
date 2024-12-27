@@ -7,51 +7,44 @@ import numpy as np
 #from torch_geometric_temporal.nn.attention import STGCN
 from torch_geometric_temporal.nn.recurrent import DCRNN, TGCN, A3TGCN, AGCRN
 from torch_geometric_temporal.nn.attention import ASTGCN, GMAN
-
-class AGCRNModel(nn.Module):
-    def __init__(self, num_nodes, in_channels, hidden_channels, out_channels):
-        super(AGCRNModel, self).__init__()
-        
-        self.agcrn = AGCRN(
-            number_of_nodes=num_nodes,
-            in_channels=in_channels,
-            hidden_channels=hidden_channels,
-            K=2  # Number of Chebyshev filter taps
-        )
-        
-        self.linear = nn.Linear(hidden_channels, out_channels)
-        
-    def forward(self, x, edge_index, edge_weight):
-        h = self.agcrn(x, edge_index, edge_weight)
-        out = self.linear(h)
-        return out
+#from stgcn import STGCN
 
 class STGCNModel(nn.Module):
-    """Spatio-Temporal Graph Convolutional Network"""
-    def __init__(self, num_nodes, in_channels, hidden_channels, out_channels, kernel_size=3):
+    def __init__(self, num_nodes, in_channels, hidden_channels, out_channels):
         super(STGCNModel, self).__init__()
-        self.stgcn = STGCN(
-            num_nodes=num_nodes,
-            in_channels=in_channels,
-            hidden_channels=hidden_channels,
-            out_channels=hidden_channels,
-            kernel_size=kernel_size,
-            K=2  # Chebyshev filter size
-        )
-        self.linear = nn.Linear(hidden_channels, out_channels)
-        self.norm = nn.LayerNorm(out_channels)
+
+        self.num_nodes = num_nodes
+        self.in_channels = in_channels
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
+
+        # Spatial convolution layer (GCNConv for graph-based processing)
+        self.spatial_conv = GCNConv(in_channels, hidden_channels)
         
-    def forward(self, graph_sequence):
-        x = torch.stack([g.x for g in graph_sequence])  # [seq_len, num_nodes, features]
-        edge_index = graph_sequence[0].edge_index
-        edge_weight = graph_sequence[0].edge_attr.squeeze()
+        # Temporal modeling via GRU
+        self.gru = nn.GRU(hidden_channels, hidden_channels, batch_first=True)
         
-        # Process through STGCN
-        out = self.stgcn(x, edge_index, edge_weight)
-        out = self.linear(out)
-        out = self.norm(out)
+        # Output layer
+        self.output_layer = nn.Linear(hidden_channels, out_channels)
+
+    def forward(self,graph_sequence):
+        outputs = []
+        for graph in graph_sequence:
+            x = graph.x
+            edge_index = graph.edge_index
+            edge_weight = graph.edge_attr.squeeze()
+        # Spatial convolution (for graph-based features)
+        spatial_features = self.spatial_conv(x, edge_index, edge_weight)
+        
+        # Temporal modeling with GRU
+        spatial_features = spatial_features.view(spatial_features.size(0), -1, self.hidden_channels)  # Flatten for GRU
+        temporal_features, _ = self.gru(spatial_features)
+
+        # Output layer
+        out = self.output_layer(temporal_features)
         
         return out
+
 
 class TGCNModel(nn.Module):
     def __init__(self, num_nodes, in_channels, hidden_channels, out_channels):
@@ -78,7 +71,7 @@ class TGCNModel(nn.Module):
             outputs.append(out)
         
         # Average temporal outputs
-        out = torch.stack(outputs).mean(dim=0)
+        out = torch.stack(outputs).squeeze(dim=0)
         
         # Final processing
         out = self.linear(out)
