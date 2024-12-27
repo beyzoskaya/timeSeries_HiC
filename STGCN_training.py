@@ -326,68 +326,50 @@ class TemporalGraphDataset:
         return sequences, labels
     
     def get_stgcn_format(self):
-        """Convert data to STGCN format"""
         # Create adjacency matrix
         adj = torch.zeros((self.num_nodes, self.num_nodes))
         adj[self.edge_index[0], self.edge_index[1]] = 1
+        adj[self.edge_index[1], self.edge_index[0]] = 1  # Make symmetric
         
-        # Normalize adjacency matrix
+        # Normalize 
         deg = torch.sum(adj, dim=1)
         deg_inv_sqrt = torch.pow(deg, -0.5)
         deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0.
         norm_adj = torch.mm(torch.mm(torch.diag(deg_inv_sqrt), adj), torch.diag(deg_inv_sqrt))
         
-        # Create feature matrix [batch_size, channels, time_steps, num_nodes]
-        features = []
-        for t in self.time_points:
-            features.append(self.node_features[t])
-        features = torch.stack(features)  # [time_steps, num_nodes, features]
-        
-        # Reshape to [batch_size=1, channels=52, time_steps, num_nodes]
-        print(f"Shape of features after stack : {features.shape}") # --> [43,52,32]
-        features = features.permute(1, 2, 0)   # [num_nodes, features, time_steps] 
-        print(f"Shape of features after permute: {features.shape}") # --> [52,32,43]
-        features = features.unsqueeze(0)  # [1, 52, 32, 43]
-        print(f"Shape of features after unsqueeze: {features.shape}")
-        
+        # Create features [batch, channels, timesteps, num_nodes]
+        features = torch.stack([self.node_features[t] for t in self.time_points])
+        features = features.permute(1, 2, 0)  # [num_nodes, features, timesteps]
+        features = features.unsqueeze(0)  # Add batch dimension
+
         return {
-            'x': features,  # [num_nodes, features, timesteps]
-            'adj': norm_adj
+            'x': features,  # [1, num_nodes, features, timesteps]
+            'adj': norm_adj  # [num_nodes, num_nodes]
         }
-    
+
     def get_temporal_sequences_stgcn(self):
-        """Create sequences in STGCN format"""
         data = self.get_stgcn_format()
         sequences = []
         labels = []
         
-        for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
-            # Get sequence window
-            seq_x = data['x'][:, :, i:i+self.seq_len]
-            label_x = data['x'][:, :, i+self.seq_len:i+self.seq_len+self.pred_len]
-            seq_x = seq_x.permute(2, 0, 1)  # [seq_len, num_nodes, features]
-            print(f"Shape for seq_x: {seq_x.shape}")
-            label_x = label_x.permute(2, 0, 1) # [pred_len, num_nodes, features]
-            print(f"Shape for label_x: {label_x.shape}")
-            print(f"Shape for unsquueze seq_x: {seq_x.unsqueeze(0).shape}")
-            
-            sequences.append({
-                'x': seq_x.unsqueeze(0), # Shape: [1, seq_len, num_nodes, features]
-                'adj': data['adj']
-            })
-            print(f"Shape for label_x.unsqueeze: {label_x.unsqueeze(0).shape}")
-            labels.append(label_x.unsqueeze(0)) # Shape: [1, pred_len, num_nodes, features]
+        features = data['x'].squeeze(0)  # [num_nodes, features, timesteps]
         
+        for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
+            # [batch, features, timesteps, num_nodes]
+            seq_x = features[..., i:i+self.seq_len]  # [num_nodes, features, seq_len]
+            seq_x = seq_x.permute(1, 2, 0)  # [features, seq_len, num_nodes]
+            seq_x = seq_x.unsqueeze(0)  # [1, features, seq_len, num_nodes]
+            
+            label_x = features[..., i+self.seq_len:i+self.seq_len+self.pred_len]
+            label_x = label_x.permute(1, 2, 0)
+            label_x = label_x.unsqueeze(0)
+            
+            sequences.append({'x': seq_x, 'adj': data['adj']})
+            labels.append(label_x)
+            
+        print(f"Final sequence shape: {sequences[0]['x'].shape}")
         return sequences, labels
-    
-    """
-    Number of nodes: 52
-    Feature shape: torch.Size([52, 33])
-    Embedding dimension: 32
-    Graph node features shape: torch.Size([52, 33])
-    Graph edge index shape: torch.Size([2, 242])
-    Graph edge attr shape: torch.Size([242, 1])
-    """
+   
 def analyze_label_distribution(model, val_sequences, val_labels, dataset):
     """Analyze the distribution of label values"""
     print("\nAnalyzing label value distribution...")
@@ -449,13 +431,11 @@ def train_model_with_early_stopping_combined_loss(
         for seq, label in zip(train_sequences, train_labels):
             optimizer.zero_grad()
             
-            # Forward pass with STGCN format - combine x and adj into single tensor
-            x = seq['x'] # Add batch dimension [1, num_nodes, num_features, time_steps]
-            # Reshape x to match expected shape for the model: [batch_size, time_steps, num_nodes, num_features]
-            #x = x.permute(0, 3, 1, 2)
+            x = seq['x'].permute(0, 3, 2, 1) 
             print(f"Shape of x before passing to model: {x.shape}") # --> 1, 1, 5, 32, 43] with unsqueeze [1, 5, 32, 43] without unsqueeze
             output = model(x)
-            target = label.squeeze()
+            target = label.permute(0, 3, 2, 1)
+            print(f"Shape of target in training: {target.shape}")
             
             loss = criterion(output, target)
             loss.backward()
@@ -774,6 +754,18 @@ def split_temporal_sequences(sequences, labels, train_size=0.8):
     return train_seq, train_labels, val_seq, val_labels, split_index
 
 if __name__ == "__main__":
+
+    class Args:
+        def __init__(self, adj_matrix):
+            self.Kt = 3 
+            self.Ks = 3
+            self.n_his = 5
+            self.act_func = 'relu'
+            self.graph_conv_type = 'graph_conv'
+            self.gso = adj_matrix
+            self.enable_bias = True
+            self.droprate = 0.3
+
     dataset = TemporalGraphDataset(
         csv_file='mapped/enhanced_interactions.csv',
         embedding_dim=32,
@@ -781,35 +773,17 @@ if __name__ == "__main__":
         pred_len=1
     )
     sequences, labels = dataset.get_temporal_sequences_stgcn()
-    
     train_seq, train_labels, val_seq, val_labels,split_index = split_temporal_sequences(sequences, labels, train_size=0.8)
-    # Transform edge_index to normalized adjacency matrix
-    edge_index = dataset.edge_index
-    adj = torch.zeros((dataset.num_nodes, dataset.num_nodes))
-    adj[edge_index[0], edge_index[1]] = 1
-    adj[edge_index[1], edge_index[0]] = 1  # Make symmetric
-
-    # Normalize
-    deg = torch.sum(adj, dim=1)
-    deg_inv_sqrt = torch.pow(deg, -0.5)
-    deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0
-    norm_adj = torch.mm(torch.mm(torch.diag(deg_inv_sqrt), adj), torch.diag(deg_inv_sqrt))
-
-    class Args:
-        def __init__(self):
-            self.Kt = 3
-            self.Ks = 3
-            self.n_his = 5
-            self.act_func = 'relu'  # Changed from 'GLU'
-            self.graph_conv_type = 'graph_conv'
-            self.gso = norm_adj
-            self.enable_bias = True
-            self.droprate = 0.3
-
-    args = Args()
-    
-    blocks = [[32, 32, 52], [52, 32, 32], [32, 32], [32, 1]]
-
+    adj_matrix = dataset.get_stgcn_format()['adj']
+    args = Args(adj_matrix)
+    sequences, labels = dataset.get_temporal_sequences_stgcn()
+    blocks = [
+    [32, 32, 32],  # First ST-Conv block
+    [32, 32, 32],  # Second ST-Conv block
+    [32, 32],      # Output block fully connected layers
+    [32, 1]        # Final prediction
+]
+    print(f"Number of nodes: {dataset.num_nodes}")
     model = STGCNGraphConv(args, blocks, n_vertex=dataset.num_nodes).float()
     
     def convert_sequences_to_float32(data):
