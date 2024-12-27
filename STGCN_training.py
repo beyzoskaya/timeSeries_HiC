@@ -337,14 +337,17 @@ class TemporalGraphDataset:
         deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0.
         norm_adj = torch.mm(torch.mm(torch.diag(deg_inv_sqrt), adj), torch.diag(deg_inv_sqrt))
         
-        # Create feature matrix [num_timesteps, num_nodes, num_features]
+        # Create feature matrix [batch_size, channels, time_steps, num_nodes]
         features = []
         for t in self.time_points:
             features.append(self.node_features[t])
-        features = torch.stack(features)
+        features = torch.stack(features)  # [time_steps, num_nodes, features]
+        
+        # Reshape to [batch_size=1, channels=52, time_steps, num_nodes]
+        features = features.permute(1, 2, 0)  # [num_nodes, features, time_steps]
         
         return {
-            'x': features.permute(1, 2, 0),  # [num_nodes, num_features, num_timesteps]
+            'x': features,  # [num_nodes, features, timesteps]
             'adj': norm_adj
         }
     
@@ -416,7 +419,7 @@ def split_temporal_sequences(sequences, labels, train_size=0.8):
 
 def train_model_with_early_stopping_combined_loss(
     model, train_sequences, train_labels, val_sequences, val_labels, 
-    num_epochs=100, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-4):
+    num_epochs=100, learning_rate=0.0001, patience=10, threshold=1e-4):
     
     save_dir = 'plottings_STGCN_temporal_graph'
     os.makedirs(save_dir, exist_ok=True)
@@ -436,10 +439,9 @@ def train_model_with_early_stopping_combined_loss(
         for seq, label in zip(train_sequences, train_labels):
             optimizer.zero_grad()
             
-            # Forward pass with STGCN format
-            output = model(seq['x'], seq['adj'])
-            
-            # Reshape label to match output
+            # Forward pass with STGCN format - combine x and adj into single tensor
+            x = seq['x'].unsqueeze(0)  # Add batch dimension [1, num_nodes, num_features, time_steps]
+            output = model(x)
             target = label.squeeze()
             
             loss = criterion(output, target)
@@ -451,7 +453,8 @@ def train_model_with_early_stopping_combined_loss(
         val_loss = 0
         with torch.no_grad():
             for seq, label in zip(val_sequences, val_labels):
-                output = model(seq['x'], seq['adj'])
+                x = seq['x'].unsqueeze(0)
+                output = model(x)
                 target = label.squeeze()
                 val_loss += criterion(output, target).item()
         
@@ -475,21 +478,7 @@ def train_model_with_early_stopping_combined_loss(
                 print("Early stopping triggered.")
                 break
     
-    # Load best model
     model.load_state_dict(torch.load(f'{save_dir}/best_model.pth'))
-    
-    # Plot training progress
-    plt.figure(figsize=(10, 6))
-    plt.plot(train_losses, label='Training Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training Progress')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(f'{save_dir}/training_progress.png')
-    plt.close()
-    
     return train_losses, val_losses
 
 def analyze_gene_predictions(model, val_sequences, val_labels, dataset, 
@@ -785,14 +774,14 @@ if __name__ == "__main__":
             self.Kt = 3
             self.Ks = 3
             self.n_his = 5
-            self.act_func = 'GLU'
-            self.graph_conv_type = 'gcn'
-            self.gso = 'sym_norm_lap'
+            self.act_func = 'relu'  # Changed from 'GLU'
+            self.graph_conv_type = 'graph_conv'
+            self.gso = dataset.edge_index
             self.enable_bias = True
             self.droprate = 0.3
 
     args = Args()
-    blocks = [[32, 32, 64], [64, 32, 32], [32, 32], [32, 1]]
+    blocks = [[32, 32, 52], [52, 32, 32], [32, 32], [32, 1]]
 
     model = STGCNGraphConv(args, blocks, n_vertex=dataset.num_nodes).float()
     
