@@ -11,7 +11,7 @@ import os
 import seaborn as sns
 from node2vec import Node2Vec
 from scipy.stats import pearsonr
-from models import  AttentionSTGCN, STGCNModel,TGCNModel
+from models import  STGCNModel,TGCNModel
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -274,12 +274,13 @@ class TemporalGraphDataset:
                 ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
                 expr_sim = 1 / (1 + abs(gene1_expr - gene2_expr))
                 
-                weight = (hic_weight * 0.3 + 
-                        compartment_sim * 0.15 + 
-                        tad_sim * 0.15 + 
-                        ins_sim * 0.15 + 
-                        expr_sim * 0.25)
-                
+                # more temporal focus weights for new model
+                weight = (hic_weight * 0.25 +  # 25% HiC
+                compartment_sim * 0.1 +        # 10% Compartment
+                tad_sim * 0.1 +                # 10% TAD
+                ins_sim * 0.05 +               # 5% Insulation
+                expr_sim * 0.5)
+                        
                 G.add_edge(row['Gene1_clean'], row['Gene2_clean'], weight=weight)
             
             # Create Node2Vec embeddings with exact embedding_dim dimensions
@@ -449,7 +450,7 @@ def analyze_label_distribution(model, val_sequences, val_labels, dataset):
     plt.title("Distribution of Label Values")
     plt.xlabel("Value")
     plt.ylabel("Frequency")
-    plt.savefig(f'plottings_TGCNModel_one_graph/label_distribution.png')
+    plt.savefig(f'plottings_AGCRNModel_temporal_graph/label_distribution.png')
     plt.close()
 
 def split_temporal_sequences(sequences, labels, train_size=0.8):
@@ -469,7 +470,7 @@ def train_model_with_early_stopping_combined_loss(
     model, train_sequences, train_labels, val_sequences, val_labels, 
     num_epochs=100, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-4):
     
-    save_dir = 'plottings_TGCNModel_one_graph'
+    save_dir = 'plottings_AGCRNModel_temporal_graph'
     os.makedirs(save_dir, exist_ok=True)
 
     print("\nChecking data ranges before training:")
@@ -555,7 +556,7 @@ def train_model_with_early_stopping_combined_loss(
     return train_losses, val_losses
 
 def analyze_gene_predictions(model, val_sequences, val_labels, dataset, 
-                           save_dir='plottings_TGCNModel_one_graph'):
+                           save_dir='plottings_AGCRNModel_temporal_graph'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     
@@ -623,7 +624,7 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset,
         
     return gene_metrics, avg_corr
 
-def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_TGCNModel_one_graph'):
+def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_AGCRNModel_temporal_graph'):
     os.makedirs(save_dir, exist_ok=True)
     
     with torch.no_grad():
@@ -657,7 +658,7 @@ def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='pl
         
         return interaction_corr
 
-def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_index, save_dir='plottings_TGCNModel_one_graph'):
+def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_index, save_dir='plottings_AGCRNModel_temporal_graph'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     metrics = {}
@@ -749,7 +750,7 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_
         
         return metrics
     
-def evaluate_model_with_direct_values(model, val_sequences, val_labels, dataset, save_dir='plottings_TGCN_direct'):
+def evaluate_model_with_direct_values(model, val_sequences, val_labels, dataset, save_dir='plottings_AGCRNModel_temporal_graph'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     
@@ -844,7 +845,7 @@ if __name__ == "__main__":
     
     model = TGCNModel(
     num_nodes=dataset.num_nodes,
-    in_channels=32,       # Must match your embedding_dim
+    in_channels=32,
     hidden_channels=64,
     out_channels=32
 ).float() # convert model to float because I got type error
@@ -881,8 +882,8 @@ if __name__ == "__main__":
     print("\nGetting raw predictions...")
     pred, target = get_raw_predictions(model, val_seq, val_labels)
 
-    print("\nEvaluating model with direct values...")
-    evaluate_model_with_direct_values(model, val_seq, val_labels, dataset)
+    #print("\nEvaluating model with direct values...")
+    #evaluate_model_with_direct_values(model, val_seq, val_labels, dataset)
 
     plt.figure(figsize=(10, 6))
     plt.plot(train_losses, label='Training Loss')
@@ -892,7 +893,7 @@ if __name__ == "__main__":
     plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_TGCNModel_one_graph/training_progress.png')
+    plt.savefig('plottings_AGCRNModel_temporal_graph/training_progress.png')
 
     #print("\nAnalyzing predictions...")
     #gene_metrics, avg_corr = analyze_gene_predictions(model, val_seq, val_labels, dataset)
