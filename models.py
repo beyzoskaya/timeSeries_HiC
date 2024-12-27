@@ -8,6 +8,24 @@ import numpy as np
 from torch_geometric_temporal.nn.recurrent import DCRNN, TGCN, A3TGCN, AGCRN
 from torch_geometric_temporal.nn.attention import ASTGCN, GMAN
 
+class AGCRNModel(nn.Module):
+    def __init__(self, num_nodes, in_channels, hidden_channels, out_channels):
+        super(AGCRNModel, self).__init__()
+        
+        self.agcrn = AGCRN(
+            number_of_nodes=num_nodes,
+            in_channels=in_channels,
+            hidden_channels=hidden_channels,
+            K=2  # Number of Chebyshev filter taps
+        )
+        
+        self.linear = nn.Linear(hidden_channels, out_channels)
+        
+    def forward(self, x, edge_index, edge_weight):
+        h = self.agcrn(x, edge_index, edge_weight)
+        out = self.linear(h)
+        return out
+
 class STGCNModel(nn.Module):
     """Spatio-Temporal Graph Convolutional Network"""
     def __init__(self, num_nodes, in_channels, hidden_channels, out_channels, kernel_size=3):
@@ -39,40 +57,32 @@ class TGCNModel(nn.Module):
     def __init__(self, num_nodes, in_channels, hidden_channels, out_channels):
         super(TGCNModel, self).__init__()
         
-        # Main TGCN layer
         self.tgcn = TGCN(
-            in_channels=in_channels,    # Should match your input feature dimension
-            out_channels=hidden_channels # Hidden dimension
+            in_channels=in_channels,
+            out_channels=hidden_channels
         )
         
-        # Output layer
         self.linear = nn.Linear(hidden_channels, out_channels)
         self.norm = nn.LayerNorm(out_channels)
         
     def forward(self, graph_sequence):
-        x = graph_sequence[0].x
-        print(f"Input feature shape: {x.shape}")  # Should be [num_nodes, in_channels]
-    
-        h = None  # Hidden state
         outputs = []
         
         for graph in graph_sequence:
-            x = graph.x  # Shape: [num_nodes, in_channels]
+            x = graph.x
             edge_index = graph.edge_index
             edge_weight = graph.edge_attr.squeeze()
             
-            # Apply TGCN
-            out, h = self.tgcn(x, edge_index, edge_weight, h)
+            # TGCN forward pass (returns only output)
+            out = self.tgcn(x, edge_index, edge_weight)
             outputs.append(out)
         
         # Average temporal outputs
         out = torch.stack(outputs).mean(dim=0)
-        print(f"TGCN output shape: {out.shape}")  # Should be [num_nodes, hidden_channels]
         
-        # Final linear layer
+        # Final processing
         out = self.linear(out)
-        out = self.norm(out)
-        print(f"Final output shape: {out.shape}")  # Should be [num_nodes, out_channels]
+        #out = self.norm(out)
         
         return out
     
