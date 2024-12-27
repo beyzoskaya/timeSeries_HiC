@@ -28,9 +28,9 @@ class STGCNModel(nn.Module):
         self.output_layer = nn.Linear(hidden_channels, out_channels)
 
     def forward(self,graph_sequence):
-        outputs = []
         for graph in graph_sequence:
-            x = graph.x
+            x = graph.x.squeeze(dim=0)
+            #print(f"Shape for x with squeeze: {x.shape}") --> [52,32] --> with 52 node and 32 embedding dim
             edge_index = graph.edge_index
             edge_weight = graph.edge_attr.squeeze()
         # Spatial convolution (for graph-based features)
@@ -41,7 +41,7 @@ class STGCNModel(nn.Module):
         temporal_features, _ = self.gru(spatial_features)
 
         # Output layer
-        out = self.output_layer(temporal_features)
+        out = self.output_layer(temporal_features).squeeze(dim=0)
         
         return out
 
@@ -71,7 +71,7 @@ class TGCNModel(nn.Module):
             outputs.append(out)
         
         # Average temporal outputs
-        out = torch.stack(outputs).squeeze(dim=0)
+        out = torch.stack(outputs).mean(dim=0)
         
         # Final processing
         out = self.linear(out)
