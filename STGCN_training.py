@@ -344,7 +344,11 @@ class TemporalGraphDataset:
         features = torch.stack(features)  # [time_steps, num_nodes, features]
         
         # Reshape to [batch_size=1, channels=52, time_steps, num_nodes]
-        features = features.permute(1, 2, 0)  # [num_nodes, features, time_steps]
+        print(f"Shape of features after stack : {features.shape}") # --> [43,52,32]
+        features = features.permute(1, 2, 0)   # [num_nodes, features, time_steps] 
+        print(f"Shape of features after permute: {features.shape}") # --> [52,32,43]
+        features = features.unsqueeze(0)  # [1, 52, 32, 43]
+        print(f"Shape of features after unsqueeze: {features.shape}")
         
         return {
             'x': features,  # [num_nodes, features, timesteps]
@@ -361,12 +365,18 @@ class TemporalGraphDataset:
             # Get sequence window
             seq_x = data['x'][:, :, i:i+self.seq_len]
             label_x = data['x'][:, :, i+self.seq_len:i+self.seq_len+self.pred_len]
+            seq_x = seq_x.permute(2, 0, 1)  # [seq_len, num_nodes, features]
+            print(f"Shape for seq_x: {seq_x.shape}")
+            label_x = label_x.permute(2, 0, 1) # [pred_len, num_nodes, features]
+            print(f"Shape for label_x: {label_x.shape}")
+            print(f"Shape for unsquueze seq_x: {seq_x.unsqueeze(0).shape}")
             
             sequences.append({
-                'x': seq_x,
+                'x': seq_x.unsqueeze(0), # Shape: [1, seq_len, num_nodes, features]
                 'adj': data['adj']
             })
-            labels.append(label_x)
+            print(f"Shape for label_x.unsqueeze: {label_x.unsqueeze(0).shape}")
+            labels.append(label_x.unsqueeze(0)) # Shape: [1, pred_len, num_nodes, features]
         
         return sequences, labels
     
@@ -440,7 +450,10 @@ def train_model_with_early_stopping_combined_loss(
             optimizer.zero_grad()
             
             # Forward pass with STGCN format - combine x and adj into single tensor
-            x = seq['x'].unsqueeze(0)  # Add batch dimension [1, num_nodes, num_features, time_steps]
+            x = seq['x'] # Add batch dimension [1, num_nodes, num_features, time_steps]
+            # Reshape x to match expected shape for the model: [batch_size, time_steps, num_nodes, num_features]
+            #x = x.permute(0, 3, 1, 2)
+            print(f"Shape of x before passing to model: {x.shape}") # --> 1, 1, 5, 32, 43] with unsqueeze [1, 5, 32, 43] without unsqueeze
             output = model(x)
             target = label.squeeze()
             
@@ -453,7 +466,9 @@ def train_model_with_early_stopping_combined_loss(
         val_loss = 0
         with torch.no_grad():
             for seq, label in zip(val_sequences, val_labels):
-                x = seq['x'].unsqueeze(0)
+                x = seq['x'].squeeze()
+                x = x.permute(0, 3, 1, 2)
+                print(f"Shape of x before passing to model: {x.shape}")
                 output = model(x)
                 target = label.squeeze()
                 val_loss += criterion(output, target).item()
@@ -768,7 +783,18 @@ if __name__ == "__main__":
     sequences, labels = dataset.get_temporal_sequences_stgcn()
     
     train_seq, train_labels, val_seq, val_labels,split_index = split_temporal_sequences(sequences, labels, train_size=0.8)
-    
+    # Transform edge_index to normalized adjacency matrix
+    edge_index = dataset.edge_index
+    adj = torch.zeros((dataset.num_nodes, dataset.num_nodes))
+    adj[edge_index[0], edge_index[1]] = 1
+    adj[edge_index[1], edge_index[0]] = 1  # Make symmetric
+
+    # Normalize
+    deg = torch.sum(adj, dim=1)
+    deg_inv_sqrt = torch.pow(deg, -0.5)
+    deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0
+    norm_adj = torch.mm(torch.mm(torch.diag(deg_inv_sqrt), adj), torch.diag(deg_inv_sqrt))
+
     class Args:
         def __init__(self):
             self.Kt = 3
@@ -776,11 +802,12 @@ if __name__ == "__main__":
             self.n_his = 5
             self.act_func = 'relu'  # Changed from 'GLU'
             self.graph_conv_type = 'graph_conv'
-            self.gso = dataset.edge_index
+            self.gso = norm_adj
             self.enable_bias = True
             self.droprate = 0.3
 
     args = Args()
+    
     blocks = [[32, 32, 52], [52, 32, 32], [32, 32], [32, 1]]
 
     model = STGCNGraphConv(args, blocks, n_vertex=dataset.num_nodes).float()
