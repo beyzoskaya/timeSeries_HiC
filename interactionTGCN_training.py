@@ -53,53 +53,60 @@ class CombinedLossWithInteractions(nn.Module):
     def __init__(self, alpha=0.6, beta=0.2, gamma=0.2):
         super(CombinedLossWithInteractions, self).__init__()
         self.alpha = alpha  # Weight for node prediction loss
-        self.beta = beta    # Weight for correlation loss
+        self.beta = beta    # Weight for temporal correlation loss
         self.gamma = gamma  # Weight for interaction loss
         self.mse = nn.MSELoss()
         self.bce = nn.BCEWithLogitsLoss()
         
+    def temporal_correlation_loss(self, pred, target):
+        """Calculate correlation loss for each gene"""
+        num_nodes, feat_dim = pred.size()
+        total_corr_loss = 0
+        
+        # Calculate correlation for each node
+        for i in range(num_nodes):
+            # Get predictions and targets for this node
+            pred_node = pred[i]
+            target_node = target[i]
+            
+            # Calculate correlation
+            vx = pred_node - torch.mean(pred_node)
+            vy = target_node - torch.mean(target_node)
+            
+            corr = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)) + 1e-12)
+            total_corr_loss += 1 - corr
+        
+        return total_corr_loss / num_nodes
+    
     def forward(self, node_pred, node_target, interaction_pred, true_edge_index):
         """
         Parameters:
         -----------
-        node_pred : torch.Tensor
-            Predicted node features [num_nodes, out_channels]
-        node_target : torch.Tensor
-            Target node features [num_nodes, out_channels]
-        interaction_pred : torch.Tensor
-            Predicted interaction matrix [num_nodes, num_nodes]
-        true_edge_index : torch.Tensor
-            Ground truth edges [2, num_edges]
+        node_pred : torch.Tensor [num_nodes, feat_dim]
+        node_target : torch.Tensor [num_nodes, feat_dim]
+        interaction_pred : torch.Tensor [num_nodes, num_nodes]
+        true_edge_index : torch.Tensor [2, num_edges]
         """
         # Node prediction loss (MSE)
         mse_loss = self.mse(node_pred, node_target)
         
-        # Correlation loss
-        pred_flat = node_pred.view(-1)
-        target_flat = node_target.view(-1)
-        vx = pred_flat - torch.mean(pred_flat)
-        vy = target_flat - torch.mean(target_flat)
-        corr = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)) + 1e-12)
-        corr_loss = 1 - corr
+        # Temporal correlation loss
+        corr_loss = self.temporal_correlation_loss(node_pred, node_target)
         
         # Interaction loss
-        # Convert edge_index to adjacency matrix
         num_nodes = node_pred.size(0)
         true_adj = torch.zeros((num_nodes, num_nodes), device=node_pred.device)
         true_adj[true_edge_index[0], true_edge_index[1]] = 1
-        
-        # Binary cross entropy for interaction prediction
         interaction_loss = self.bce(interaction_pred, true_adj)
         
-        # Combine all losses
+        # Combine losses
         total_loss = (self.alpha * mse_loss + 
                      self.beta * corr_loss + 
                      self.gamma * interaction_loss)
         
-        # Return both total loss and individual components for monitoring
         return total_loss, {
             "mse": mse_loss.item(),
-            "correlation": corr.item(),
+            "correlation": corr_loss.item(),
             "interaction": interaction_loss.item()
         }
 
@@ -664,112 +671,137 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset,
         
         return gene_metrics, avg_corr
 
-def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_index, 
-                             save_dir='plottings_TGCNWithInteractions'):
+def evaluate_temporal_correlations(predictions, targets):
+    """
+    Calculate temporal correlations properly for each gene
+    """
+    num_timesteps, num_nodes, feat_dim = predictions.shape
+    temporal_correlations = []
+    gene_temporal_corrs = {}
+    
+    for i in range(num_nodes):
+        gene_corrs = []
+        for j in range(feat_dim):
+            # Get time series for this gene and feature
+            pred_series = predictions[:, i, j]
+            target_series = targets[:, i, j]
+            
+            # Calculate correlation
+            corr = pearsonr(pred_series, target_series)[0]
+            if not np.isnan(corr):
+                gene_corrs.append(corr)
+                temporal_correlations.append(corr)
+        
+        if gene_corrs:
+            gene_temporal_corrs[i] = np.mean(gene_corrs)
+    
+    return temporal_correlations, gene_temporal_corrs
+
+def evaluate_temporal_performance(model, val_sequences, val_labels, dataset, 
+                              save_dir='plottings_TGCNWithInteractions'):
+    """Enhanced temporal evaluation function"""
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
-    metrics = {}
-    
-    time_points = dataset.time_points
-    seq_length = dataset.seq_len
-    start_idx = split_index + seq_length
-    prediction_times = time_points[start_idx:]
-    
-    print("\nValidation Time Information:")
-    print(f"Original time points: {time_points}")
-    print(f"Split index: {split_index}")
-    print(f"Sequence length: {seq_length}")
-    print(f"Start index for predictions: {start_idx}")
-    print(f"Prediction times: {prediction_times}")
     
     with torch.no_grad():
-        all_node_predictions = []
-        all_interaction_predictions = []
-        all_targets = []
-        all_true_interactions = []
+        # Store predictions and targets by time point
+        time_series_pred = defaultdict(list)
+        time_series_true = defaultdict(list)
         
-        for seq, label in zip(val_sequences, val_labels):
-            node_pred, interaction_pred = model(seq)
+        # Get predictions for each sequence
+        for seq_idx, (seq, label) in enumerate(zip(val_sequences, val_labels)):
+            node_pred, _ = model(seq)
             target = torch.stack([g.x for g in label]).squeeze(dim=0)
             
             # Store predictions and targets
-            all_node_predictions.append(node_pred.numpy())
-            all_interaction_predictions.append(interaction_pred.numpy())
-            all_targets.append(target.numpy())
-            
-            # Create true interaction matrix
-            num_nodes = node_pred.size(0)
-            true_adj = torch.zeros((num_nodes, num_nodes))
-            edge_index = seq[0].edge_index
-            true_adj[edge_index[0], edge_index[1]] = 1
-            all_true_interactions.append(true_adj.numpy())
+            time_series_pred[seq_idx] = node_pred.numpy()
+            time_series_true[seq_idx] = target.numpy()
         
-        # Convert to numpy arrays
-        predictions = np.stack(all_node_predictions)
-        targets = np.stack(all_targets)
-        interaction_preds = np.stack(all_interaction_predictions)
-        true_interactions = np.stack(all_true_interactions)
-        
-        # Calculate node prediction metrics
-        metrics['Overall'] = {
-            'MSE': np.mean((predictions - targets) ** 2),
-            'MAE': np.mean(np.abs(predictions - targets)),
-            'RMSE': np.sqrt(np.mean((predictions - targets) ** 2)),
-            'Pearson_Correlation': pearsonr(predictions.flatten(), targets.flatten())[0],
-            'R2_Score': 1 - np.sum((predictions - targets) ** 2) / np.sum((targets - np.mean(targets)) ** 2)
-        }
-        
-        # Calculate interaction metrics
-        pred_interactions = np.corrcoef(predictions.reshape(predictions.shape[0], -1))
-        true_interactions = np.corrcoef(targets.reshape(targets.shape[0], -1))
-        metrics['Overall']['Interaction_Correlation'] = np.corrcoef(pred_interactions.flatten(), 
-                                                                  true_interactions.flatten())[0, 1]
-        
-        # Gene-wise analysis
+        # Calculate temporal metrics for each gene
         genes = list(dataset.node_map.keys())
-        gene_correlations = []
-        temporal_correlations = []
+        temporal_metrics = {}
         
-        for i, gene in enumerate(genes):
-            gene_pred = predictions[:, i, :]
-            gene_target = targets[:, i, :]
+        for gene_idx, gene in enumerate(genes):
+            gene_pred_series = []
+            gene_true_series = []
             
-            corr = pearsonr(gene_pred.flatten(), gene_target.flatten())[0]
-            gene_correlations.append(corr)
+            # Collect time series for this gene
+            for t in range(len(time_series_pred)):
+                gene_pred_series.append(time_series_pred[t][gene_idx])
+                gene_true_series.append(time_series_true[t][gene_idx])
             
-            # Calculate temporal correlation for this gene
-            for t in range(predictions.shape[2]):
-                temp_corr = pearsonr(predictions[:, i, t], targets[:, i, t])[0]
-                if not np.isnan(temp_corr):
-                    temporal_correlations.append(temp_corr)
+            # Convert to numpy arrays
+            gene_pred_series = np.array(gene_pred_series)
+            gene_true_series = np.array(gene_true_series)
+            
+            # Calculate metrics
+            temporal_corr = pearsonr(gene_pred_series.flatten(), 
+                                   gene_true_series.flatten())[0]
+            
+            mse = np.mean((gene_pred_series - gene_true_series) ** 2)
+            
+            # Calculate rate of change correlation
+            pred_diff = np.diff(gene_pred_series, axis=0)
+            true_diff = np.diff(gene_true_series, axis=0)
+            trend_corr = pearsonr(pred_diff.flatten(), true_diff.flatten())[0]
+            
+            temporal_metrics[gene] = {
+                'temporal_correlation': temporal_corr if not np.isnan(temporal_corr) else 0,
+                'trend_correlation': trend_corr if not np.isnan(trend_corr) else 0,
+                'mse': mse
+            }
+            
+            # Plot temporal patterns
+            plt.figure(figsize=(15, 5))
+            
+            # Original values plot
+            plt.subplot(1, 2, 1)
+            plt.plot(gene_pred_series, label='Predicted', alpha=0.7)
+            plt.plot(gene_true_series, label='Actual', alpha=0.7)
+            plt.title(f'{gene} Expression Over Time\nTemporal Corr: {temporal_corr:.3f}')
+            plt.xlabel('Time Step')
+            plt.ylabel('Expression')
+            plt.legend()
+            
+            # Rate of change plot
+            plt.subplot(1, 2, 2)
+            plt.plot(pred_diff, label='Predicted Change', alpha=0.7)
+            plt.plot(true_diff, label='Actual Change', alpha=0.7)
+            plt.title(f'Rate of Change\nTrend Corr: {trend_corr:.3f}')
+            plt.xlabel('Time Step')
+            plt.ylabel('Expression Change')
+            plt.legend()
+            
+            plt.savefig(os.path.join(save_dir, f'gene_{gene}_temporal_analysis.png'))
+            plt.close()
         
-        metrics['Gene_Performance'] = {
-            'Mean_Correlation': np.mean(gene_correlations),
-            'Median_Correlation': np.median(gene_correlations),
-            'Std_Correlation': np.std(gene_correlations),
-            'Best_Genes': [genes[i] for i in np.argsort(gene_correlations)[-5:]],
-            'Worst_Genes': [genes[i] for i in np.argsort(gene_correlations)[:5]]
+        # Calculate summary statistics
+        temporal_summary = {
+            'mean_temporal_correlation': np.mean([m['temporal_correlation'] 
+                                                for m in temporal_metrics.values()]),
+            'mean_trend_correlation': np.mean([m['trend_correlation'] 
+                                             for m in temporal_metrics.values()]),
+            'best_temporal_genes': sorted(genes, 
+                                        key=lambda g: temporal_metrics[g]['temporal_correlation'],
+                                        reverse=True)[:5],
+            'best_trend_genes': sorted(genes,
+                                     key=lambda g: temporal_metrics[g]['trend_correlation'],
+                                     reverse=True)[:5]
         }
         
-        metrics['Temporal_Stability'] = {
-            'Mean_Temporal_Correlation': np.mean(temporal_correlations),
-            'Std_Temporal_Correlation': np.std(temporal_correlations),
-            'Min_Temporal_Correlation': np.min(temporal_correlations),
-            'Max_Temporal_Correlation': np.max(temporal_correlations)
-        }
+        # Save detailed metrics
+        with open(os.path.join(save_dir, 'temporal_metrics.txt'), 'w') as f:
+            f.write("Temporal Analysis Results\n\n")
+            f.write(f"Mean Temporal Correlation: {temporal_summary['mean_temporal_correlation']:.4f}\n")
+            f.write(f"Mean Trend Correlation: {temporal_summary['mean_trend_correlation']:.4f}\n")
+            f.write("\nBest Performing Genes (Temporal):\n")
+            for gene in temporal_summary['best_temporal_genes']:
+                f.write(f"{gene}: {temporal_metrics[gene]['temporal_correlation']:.4f}\n")
+            f.write("\nBest Performing Genes (Trend):\n")
+            for gene in temporal_summary['best_trend_genes']:
+                f.write(f"{gene}: {temporal_metrics[gene]['trend_correlation']:.4f}\n")
         
-        # Save detailed results
-        with open(os.path.join(save_dir, 'evaluation_results.txt'), 'w') as f:
-            f.write("Model Evaluation Results\n\n")
-            for category, category_metrics in metrics.items():
-                f.write(f"\n{category}:\n")
-                for metric, value in category_metrics.items():
-                    if isinstance(value, (float, int)):
-                        f.write(f"{metric}: {value:.4f}\n")
-                    else:
-                        f.write(f"{metric}: {value}\n")
-        
-        return metrics
+        return temporal_metrics, temporal_summary
     
 def split_temporal_sequences(sequences, labels, train_size=0.8):
     """Split sequences while maintaining temporal order and return indices"""
@@ -865,13 +897,15 @@ if __name__ == "__main__":
     #print(f"Average Gene Correlation: {np.mean([m['Correlation'] for m in gene_metrics.values()]):.4f}")
     print(f"Interaction Preservation: {interaction_corr:.4f}")
 
-    metrics = evaluate_model_performance(model, val_seq, val_labels, dataset, split_index)
-    print("\nModel Performance Summary:")
-    print(f"Overall Pearson Correlation: {metrics['Overall']['Pearson_Correlation']:.4f}")
-    print(f"RMSE: {metrics['Overall']['RMSE']:.4f}")
-    print(f"R² Score: {metrics['Overall']['R2_Score']:.4f}")
-    print(f"\nGene-wise Performance:")
-    print(f"Mean Gene Correlation: {metrics['Gene_Performance']['Mean_Correlation']:.4f}")
-    print(f"Best Performing Genes: {', '.join(metrics['Gene_Performance']['Best_Genes'])}")
-    print(f"\nTemporal Stability:")
-    print(f"Mean Temporal Correlation: {metrics['Temporal_Stability']['Mean_Temporal_Correlation']:.4f}")
+    # After training and regular evaluation
+    print("\nPerforming detailed temporal analysis...")
+    temporal_metrics, temporal_summary = evaluate_temporal_performance(
+        model, val_seq, val_labels, dataset
+    )
+
+    print("\nTemporal Analysis Summary:")
+    print(f"Mean Temporal Correlation: {temporal_summary['mean_temporal_correlation']:.4f}")
+    print(f"Mean Trend Correlation: {temporal_summary['mean_trend_correlation']:.4f}")
+    print("\nBest Genes for Temporal Patterns:")
+    for gene in temporal_summary['best_temporal_genes']:
+        print(f"- {gene}: {temporal_metrics[gene]['temporal_correlation']:.4f}")
