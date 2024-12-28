@@ -15,6 +15,10 @@ from sklearn.metrics import roc_auc_score
 from collections import defaultdict
 from models import TemporalGNN, TGCNWithInteractions
 
+
+torch.manual_seed(42)
+np.random.seed(42)
+
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
     if pd.isna(gene_name):
@@ -430,7 +434,7 @@ def split_temporal_sequences(sequences, labels, train_size=0.8):
 
 def train_model_with_early_stopping_combined_loss(
     model, train_sequences, train_labels, val_sequences, val_labels, 
-    num_epochs=70, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-4):
+    num_epochs=60, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-4):
     
     save_dir = 'plottings_TGCNWithInteractions'
     os.makedirs(save_dir, exist_ok=True)
@@ -700,7 +704,6 @@ def evaluate_temporal_correlations(predictions, targets):
 
 def evaluate_temporal_performance(model, val_sequences, val_labels, dataset, 
                               save_dir='plottings_TGCNWithInteractions'):
-    """Enhanced temporal evaluation function"""
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     
@@ -715,12 +718,17 @@ def evaluate_temporal_performance(model, val_sequences, val_labels, dataset,
             target = torch.stack([g.x for g in label]).squeeze(dim=0)
             
             # Store predictions and targets
-            time_series_pred[seq_idx] = node_pred.numpy()
-            time_series_true[seq_idx] = target.numpy()
+            time_series_pred[seq_idx] = node_pred.detach().numpy()
+            time_series_true[seq_idx] = target.detach().numpy()
         
         # Calculate temporal metrics for each gene
         genes = list(dataset.node_map.keys())
         temporal_metrics = {}
+        
+        # Create a figure for comparing top and bottom performing genes
+        plt.figure(figsize=(15, 10))
+        top_gene_plot_count = 0
+        bottom_gene_plot_count = 0
         
         for gene_idx, gene in enumerate(genes):
             gene_pred_series = []
@@ -735,72 +743,87 @@ def evaluate_temporal_performance(model, val_sequences, val_labels, dataset,
             gene_pred_series = np.array(gene_pred_series)
             gene_true_series = np.array(gene_true_series)
             
-            # Calculate metrics
-            temporal_corr = pearsonr(gene_pred_series.flatten(), 
-                                   gene_true_series.flatten())[0]
+            # Take mean across features if multiple features exist
+            if len(gene_pred_series.shape) > 1:
+                gene_pred_series = gene_pred_series.mean(axis=1)
+                gene_true_series = gene_true_series.mean(axis=1)
             
-            mse = np.mean((gene_pred_series - gene_true_series) ** 2)
-            
-            # Calculate rate of change correlation
-            pred_diff = np.diff(gene_pred_series, axis=0)
-            true_diff = np.diff(gene_true_series, axis=0)
-            trend_corr = pearsonr(pred_diff.flatten(), true_diff.flatten())[0]
+            # Calculate temporal correlation
+            try:
+                temporal_corr = pearsonr(gene_pred_series, gene_true_series)[0]
+            except:
+                temporal_corr = 0
             
             temporal_metrics[gene] = {
                 'temporal_correlation': temporal_corr if not np.isnan(temporal_corr) else 0,
-                'trend_correlation': trend_corr if not np.isnan(trend_corr) else 0,
-                'mse': mse
+                'mse': np.mean((gene_pred_series - gene_true_series) ** 2)
             }
             
-            # Plot temporal patterns
-            plt.figure(figsize=(15, 5))
+            # Individual gene plot with simple design
+            plt.figure(figsize=(10, 5))
+            time_points = range(len(gene_pred_series))
             
-            # Original values plot
-            plt.subplot(1, 2, 1)
-            plt.plot(gene_pred_series, label='Predicted', alpha=0.7)
-            plt.plot(gene_true_series, label='Actual', alpha=0.7)
-            plt.title(f'{gene} Expression Over Time\nTemporal Corr: {temporal_corr:.3f}')
-            plt.xlabel('Time Step')
-            plt.ylabel('Expression')
+            plt.plot(time_points, gene_true_series, 'b-', label='Actual', linewidth=2)
+            plt.plot(time_points, gene_pred_series, 'r--', label='Predicted', linewidth=2)
+            
+            plt.title(f'Gene: {gene}\nTemporal Correlation: {temporal_corr:.3f}')
+            plt.xlabel('Time Steps')
+            plt.ylabel('Expression Value')
+            plt.grid(True, alpha=0.3)
             plt.legend()
             
-            # Rate of change plot
-            plt.subplot(1, 2, 2)
-            plt.plot(pred_diff, label='Predicted Change', alpha=0.7)
-            plt.plot(true_diff, label='Actual Change', alpha=0.7)
-            plt.title(f'Rate of Change\nTrend Corr: {trend_corr:.3f}')
-            plt.xlabel('Time Step')
-            plt.ylabel('Expression Change')
-            plt.legend()
-            
-            plt.savefig(os.path.join(save_dir, f'gene_{gene}_temporal_analysis.png'))
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, f'gene_{gene}_temporal.png'))
             plt.close()
+        
+        # Sort genes by correlation for summary
+        sorted_genes = sorted(temporal_metrics.items(), 
+                            key=lambda x: x[1]['temporal_correlation'],
+                            reverse=True)
+        
+        # Plot summary of top 5 and bottom 5 genes
+        plt.figure(figsize=(15, 10))
+        
+        # Top 5 genes
+        plt.subplot(2, 1, 1)
+        top_genes = sorted_genes[:5]
+        x_pos = np.arange(len(top_genes))
+        plt.bar(x_pos, [g[1]['temporal_correlation'] for g in top_genes])
+        plt.xticks(x_pos, [g[0] for g in top_genes], rotation=45)
+        plt.title('Top 5 Genes by Temporal Correlation')
+        plt.ylabel('Correlation')
+        
+        # Bottom 5 genes
+        plt.subplot(2, 1, 2)
+        bottom_genes = sorted_genes[-5:]
+        x_pos = np.arange(len(bottom_genes))
+        plt.bar(x_pos, [g[1]['temporal_correlation'] for g in bottom_genes])
+        plt.xticks(x_pos, [g[0] for g in bottom_genes], rotation=45)
+        plt.title('Bottom 5 Genes by Temporal Correlation')
+        plt.ylabel('Correlation')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'temporal_correlation_summary.png'))
+        plt.close()
         
         # Calculate summary statistics
         temporal_summary = {
             'mean_temporal_correlation': np.mean([m['temporal_correlation'] 
                                                 for m in temporal_metrics.values()]),
-            'mean_trend_correlation': np.mean([m['trend_correlation'] 
-                                             for m in temporal_metrics.values()]),
-            'best_temporal_genes': sorted(genes, 
-                                        key=lambda g: temporal_metrics[g]['temporal_correlation'],
-                                        reverse=True)[:5],
-            'best_trend_genes': sorted(genes,
-                                     key=lambda g: temporal_metrics[g]['trend_correlation'],
-                                     reverse=True)[:5]
+            'best_temporal_genes': [g[0] for g in sorted_genes[:5]],
+            'worst_temporal_genes': [g[0] for g in sorted_genes[-5:]]
         }
         
         # Save detailed metrics
         with open(os.path.join(save_dir, 'temporal_metrics.txt'), 'w') as f:
             f.write("Temporal Analysis Results\n\n")
             f.write(f"Mean Temporal Correlation: {temporal_summary['mean_temporal_correlation']:.4f}\n")
-            f.write(f"Mean Trend Correlation: {temporal_summary['mean_trend_correlation']:.4f}\n")
-            f.write("\nBest Performing Genes (Temporal):\n")
-            for gene in temporal_summary['best_temporal_genes']:
-                f.write(f"{gene}: {temporal_metrics[gene]['temporal_correlation']:.4f}\n")
-            f.write("\nBest Performing Genes (Trend):\n")
-            for gene in temporal_summary['best_trend_genes']:
-                f.write(f"{gene}: {temporal_metrics[gene]['trend_correlation']:.4f}\n")
+            f.write("\nTop 5 Genes by Temporal Correlation:\n")
+            for gene, metrics in sorted_genes[:5]:
+                f.write(f"{gene}: {metrics['temporal_correlation']:.4f}\n")
+            f.write("\nBottom 5 Genes by Temporal Correlation:\n")
+            for gene, metrics in sorted_genes[-5:]:
+                f.write(f"{gene}: {metrics['temporal_correlation']:.4f}\n")
         
         return temporal_metrics, temporal_summary
     
@@ -906,7 +929,6 @@ if __name__ == "__main__":
 
     print("\nTemporal Analysis Summary:")
     print(f"Mean Temporal Correlation: {temporal_summary['mean_temporal_correlation']:.4f}")
-    print(f"Mean Trend Correlation: {temporal_summary['mean_trend_correlation']:.4f}")
     print("\nBest Genes for Temporal Patterns:")
     for gene in temporal_summary['best_temporal_genes']:
         print(f"- {gene}: {temporal_metrics[gene]['temporal_correlation']:.4f}")
