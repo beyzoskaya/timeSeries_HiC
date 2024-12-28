@@ -5,47 +5,107 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 import numpy as np
 #from torch_geometric_temporal.nn.attention import STGCN
-from torch_geometric_temporal.nn.recurrent import DCRNN, TGCN, A3TGCN, AGCRN
-from torch_geometric_temporal.nn.attention import ASTGCN, GMAN
-#from stgcn import STGCN
+from torch_geometric_temporal.nn.recurrent import DCRNN, A3TGCN, TGCN, AGCRN
+from torch_geometric.nn import GCNConv, ChebConv
 
-class STGCNModel(nn.Module):
-    def __init__(self, num_nodes, in_channels, hidden_channels, out_channels):
-        super(STGCNModel, self).__init__()
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric_temporal.nn.recurrent import DCRNN, TGCN
+from torch_geometric.nn import GCNConv
 
+class TemporalGNN(nn.Module):
+    def __init__(self, num_nodes, in_channels, hidden_channels, out_channels, 
+                 window_size=5, model_type='TGCN'):
+        super(TemporalGNN, self).__init__()
+        
         self.num_nodes = num_nodes
+        self.window_size = window_size
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
-        self.out_channels = out_channels
-
-        # Spatial convolution layer (GCNConv for graph-based processing)
-        self.spatial_conv = GCNConv(in_channels, hidden_channels)
+        self.model_type = model_type
         
-        # Temporal modeling via GRU
-        self.gru = nn.GRU(hidden_channels, hidden_channels, batch_first=True)
+        # Temporal processing
+        self.weight = nn.Parameter(torch.Tensor(window_size, in_channels, hidden_channels))
+        self.bias = nn.Parameter(torch.Tensor(hidden_channels))
+        torch.nn.init.xavier_uniform_(self.weight)
+        torch.nn.init.zeros_(self.bias)
         
-        # Output layer
-        self.output_layer = nn.Linear(hidden_channels, out_channels)
-
-    def forward(self,graph_sequence):
-        for graph in graph_sequence:
-            x = graph.x.squeeze(dim=0)
-            #print(f"Shape for x with squeeze: {x.shape}") --> [52,32] --> with 52 node and 32 embedding dim
-            edge_index = graph.edge_index
-            edge_weight = graph.edge_attr.squeeze()
-        # Spatial convolution (for graph-based features)
-        spatial_features = self.spatial_conv(x, edge_index, edge_weight)
+        # Temporal attention
+        self.attention_weight = nn.Parameter(torch.Tensor(hidden_channels, 1))
+        torch.nn.init.xavier_uniform_(self.attention_weight)
         
-        # Temporal modeling with GRU
-        spatial_features = spatial_features.view(spatial_features.size(0), -1, self.hidden_channels)  # Flatten for GRU
-        temporal_features, _ = self.gru(spatial_features)
-
-        # Output layer
-        out = self.output_layer(temporal_features).squeeze(dim=0)
+        # GCN layers for spatial processing
+        self.conv1 = GCNConv(hidden_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        
+        # Output projection
+        self.linear = nn.Linear(hidden_channels, out_channels)
+        
+        # BatchNorm layers
+        self.batch_norm1 = nn.BatchNorm1d(52)  # num_nodes
+        self.batch_norm2 = nn.BatchNorm1d(52)  # num_nodes
+        
+        # Dropout for regularization
+        self.dropout = nn.Dropout(0.2)
+        
+    def temporal_attention(self, x):
+        # x shape: [num_nodes, window_size, hidden_channels]
+        attention_scores = torch.matmul(x, self.attention_weight)
+        attention_weights = F.softmax(attention_scores, dim=1)
+        attended_x = torch.sum(x * attention_weights, dim=1)
+        return attended_x
+        
+    def forward(self, sequence):
+        # Extract edge information
+        edge_index = sequence[0].edge_index
+        edge_weight = sequence[0].edge_attr.squeeze() if sequence[0].edge_attr is not None else None
+        
+        # Stack sequence [seq_len, num_nodes, features]
+        x = torch.stack([graph.x for graph in sequence])
+        print(f"Initial x shape: {x.shape}")
+        
+        # Reshape to [num_nodes, seq_len, features]
+        x = x.permute(1, 0, 2).contiguous()
+        print(f"After permute shape: {x.shape}")
+        
+        # Process each time step with learned weights
+        hidden_states = []
+        for t in range(self.window_size):
+            h_t = torch.matmul(x[:, t, :], self.weight[t])
+            hidden_states.append(h_t)
+        
+        # Stack hidden states
+        h = torch.stack(hidden_states, dim=1)
+        print(f"After temporal processing shape: {h.shape}")
+        
+        # Apply temporal attention
+        h = self.temporal_attention(h)
+        h = h + self.bias
+        print(f"After attention shape: {h.shape}")  # [52, 64]
+        
+        # First GCN layer
+        h1 = self.conv1(h, edge_index, edge_weight)
+        h1 = h1.transpose(0, 1)  # [64, 52]
+        h1 = self.batch_norm1(h1)
+        h1 = h1.transpose(0, 1)  # [52, 64]
+        h1 = self.dropout(torch.relu(h1))
+        print(f"After first conv shape: {h1.shape}")
+        
+        # Second GCN layer
+        h2 = self.conv2(h1, edge_index, edge_weight)
+        h2 = h2.transpose(0, 1)  # [64, 52]
+        h2 = self.batch_norm2(h2)
+        h2 = h2.transpose(0, 1)  # [52, 64]
+        h2 = self.dropout(torch.relu(h2))
+        print(f"After second conv shape: {h2.shape}")
+        
+        # Output projection
+        out = self.linear(h2)  # [52, 32]
+        print(f"Final output shape: {out.shape}")
         
         return out
-
-
+    
 class TGCNModel(nn.Module):
     def __init__(self, num_nodes, in_channels, hidden_channels, out_channels):
         super(TGCNModel, self).__init__()
