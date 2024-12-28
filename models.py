@@ -138,6 +138,101 @@ class TGCNModel(nn.Module):
         #out = self.norm(out)
         
         return out
+
+class InteractionPredictor(nn.Module):
+    def __init__(self, hidden_channels):
+        super(InteractionPredictor, self).__init__()
+        
+        # Layers for interaction prediction
+        self.interaction_layer1 = nn.Linear(hidden_channels * 2, hidden_channels)
+        self.interaction_layer2 = nn.Linear(hidden_channels, 1)
+        
+    def forward(self, node_embeddings):
+        num_nodes = node_embeddings.size(0)
+        
+        # Create all pairs of node embeddings
+        node_i = node_embeddings.unsqueeze(1).repeat(1, num_nodes, 1)
+        node_j = node_embeddings.unsqueeze(0).repeat(num_nodes, 1, 1)
+        
+        # Concatenate pairs
+        pairs = torch.cat([node_i, node_j], dim=-1)
+        
+        # Predict interaction scores
+        h = torch.relu(self.interaction_layer1(pairs))
+        scores = self.interaction_layer2(h).squeeze(-1)
+        
+        return scores
+
+class TGCNWithInteractions(nn.Module):
+    def __init__(self, num_nodes, in_channels, hidden_channels, out_channels):
+        super(TGCNWithInteractions, self).__init__()
+        
+        self.num_nodes = num_nodes
+        self.hidden_channels = hidden_channels
+        
+        # Base TGCN for temporal graph processing
+        self.tgcn = TGCN(in_channels=in_channels,
+                         out_channels=hidden_channels)
+        
+        # Dimensionality reduction layer to handle TGCN output
+        self.reduce_dim = nn.Linear(hidden_channels * 5, hidden_channels)  # 5 is sequence length
+        
+        # Additional GCN layers for spatial processing
+        self.conv1 = GCNConv(hidden_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        
+        # Output projection
+        self.linear = nn.Linear(hidden_channels, out_channels)
+        
+        # Interaction predictor
+        self.interaction_predictor = InteractionPredictor(hidden_channels)
+        
+        # Layer normalization and dropout
+        self.layer_norm1 = nn.LayerNorm(hidden_channels)
+        self.layer_norm2 = nn.LayerNorm(hidden_channels)
+        self.dropout = nn.Dropout(0.2)
+        
+    def forward(self, sequence):
+        # Extract edge information
+        edge_index = sequence[0].edge_index
+        edge_weight = sequence[0].edge_attr.squeeze() if sequence[0].edge_attr is not None else None
+        
+        # Process temporal sequence
+        x = torch.stack([graph.x for graph in sequence])  # [seq_len, num_nodes, features]
+        seq_len, num_nodes, feat_dim = x.size()
+        
+        # Process each time step with TGCN
+        h_sequence = []
+        for t in range(seq_len):
+            h_t = self.tgcn(x[t], edge_index, edge_weight)  # [num_nodes, hidden_channels]
+            h_sequence.append(h_t)
+        
+        # Stack temporal features
+        h = torch.stack(h_sequence, dim=1)  # [num_nodes, seq_len, hidden_channels]
+        
+        # Flatten temporal dimension and reduce dimensionality
+        h = h.reshape(num_nodes, -1)  # [num_nodes, seq_len * hidden_channels]
+        h = self.reduce_dim(h)  # [num_nodes, hidden_channels]
+        
+        # Store intermediate embeddings for interaction prediction
+        intermediate_embeddings = h.clone()
+        
+        # Spatial processing with GCN
+        h = self.conv1(h, edge_index, edge_weight)
+        h = self.layer_norm1(h)
+        h = self.dropout(torch.relu(h))
+        
+        h = self.conv2(h, edge_index, edge_weight)
+        h = self.layer_norm2(h)
+        h = self.dropout(torch.relu(h))
+        
+        # Predict node features
+        node_predictions = self.linear(h)  # [num_nodes, out_channels]
+        
+        # Predict interactions using intermediate embeddings
+        interaction_matrix = self.interaction_predictor(intermediate_embeddings)
+        
+        return node_predictions, interaction_matrix
     
 class BaseSTGCNLayer(nn.Module):
     def __init__(self, in_channels, out_channels):
