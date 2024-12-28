@@ -49,26 +49,6 @@ def analyze_label_structure(val_sequences, val_labels):
     
     return seq[0].x.shape, label[0].x.shape
 
-def get_raw_predictions(model, val_sequences, val_labels):
-    """Get predictions without any averaging"""
-    model.eval()
-    with torch.no_grad():
-        # Get one sequence prediction
-        seq = val_sequences[0]
-        label = val_labels[0]
-        
-        # Get prediction
-        pred = model(seq)
-        target = label[0].x  # Direct access without mean
-        
-        print("\n=== Prediction Analysis ===")
-        
-        print("\nFirst node values:")
-        print(f"Predicted: {pred[0, :5]}")  # First node, first 5 features
-        print(f"Target: {target[0, :5]}")   # First node, first 5 features
-        
-        return pred, target
-
 class CombinedLossWithInteractions(nn.Module):
     def __init__(self, alpha=0.6, beta=0.2, gamma=0.2):
         super(CombinedLossWithInteractions, self).__init__()
@@ -541,6 +521,74 @@ def train_model_with_early_stopping_combined_loss(
     
     return train_losses, val_losses
 
+def get_raw_predictions(model, val_sequences, val_labels):
+    """Get predictions without any averaging"""
+    model.eval()
+    with torch.no_grad():
+        # Get one sequence prediction
+        seq = val_sequences[0]
+        label = val_labels[0]
+        
+        # Get prediction (now handling tuple output)
+        node_pred, interaction_pred = model(seq)
+        target = label[0].x  # Direct access without mean
+        
+        print("\n=== Prediction Analysis ===")
+        print(f"Raw node prediction shape: {node_pred.shape}")
+        print(f"Raw interaction prediction shape: {interaction_pred.shape}")
+        print(f"Raw target shape: {target.shape}")
+        
+        print("\nFirst node values:")
+        print(f"Node Predicted: {node_pred[0, :5]}")  # First node, first 5 features
+        print(f"Target: {target[0, :5]}")   # First node, first 5 features
+        
+        return node_pred, interaction_pred, target
+
+def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_TGCNWithInteractions'):
+    os.makedirs(save_dir, exist_ok=True)
+    
+    with torch.no_grad():
+        # Get predictions
+        node_pred, interaction_pred = model(val_sequences[0])
+        target = torch.stack([g.x for g in val_labels[0]]).squeeze(dim=0)
+        
+        # Convert to numpy for analysis
+        node_pred_np = node_pred.numpy()
+        interaction_pred_np = interaction_pred.numpy()
+        target_np = target.numpy()
+        
+        # Calculate correlation matrices
+        pred_interactions = np.corrcoef(node_pred_np)
+        true_interactions = np.corrcoef(target_np)
+        
+        # Plot interaction matrices
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
+        
+        sns.heatmap(true_interactions, ax=ax1, cmap='coolwarm')
+        ax1.set_title('True Interactions')
+        
+        sns.heatmap(pred_interactions, ax=ax2, cmap='coolwarm')
+        ax2.set_title('Predicted Node-based Interactions')
+        
+        sns.heatmap(interaction_pred_np, ax=ax3, cmap='coolwarm')
+        ax3.set_title('Direct Interaction Predictions')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'interaction_comparison.png'))
+        plt.close()
+        
+        # Calculate correlations
+        node_based_corr = np.corrcoef(true_interactions.flatten(), 
+                                     pred_interactions.flatten())[0, 1]
+        direct_corr = np.corrcoef(true_interactions.flatten(), 
+                                 interaction_pred_np.flatten())[0, 1]
+        
+        with open(os.path.join(save_dir, 'interaction_metrics.txt'), 'w') as f:
+            f.write(f'Node-based Interaction Correlation: {node_based_corr:.4f}\n')
+            f.write(f'Direct Interaction Correlation: {direct_corr:.4f}\n')
+        
+        return max(node_based_corr, direct_corr)
+
 def analyze_gene_predictions(model, val_sequences, val_labels, dataset, 
                            save_dir='plottings_TGCNWithInteractions'):
     os.makedirs(save_dir, exist_ok=True)
@@ -551,10 +599,9 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset,
         all_targets = []
         
         for seq, label in zip(val_sequences, val_labels):
-            pred = model(seq)
-            #target = torch.stack([g.x for g in label]).mean(dim=0)
+            node_pred, _ = model(seq)  # Only use node predictions
             target = torch.stack([g.x for g in label]).squeeze(dim=0)
-            all_predictions.append(pred.numpy())
+            all_predictions.append(node_pred.numpy())
             all_targets.append(target.numpy())
         
         predictions = np.stack(all_predictions)
@@ -581,9 +628,9 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset,
             plt.figure(figsize=(10, 6))
             plt.plot(gene_pred[0], label='Predicted', alpha=0.7)
             plt.plot(gene_target[0], label='Actual', alpha=0.7)
-            plt.title(f'Time Series Prediction for {gene}')
+            plt.title(f'Time Series Prediction for {gene} (corr={corr:.3f})')
             plt.xlabel('Time Step')
-            plt.ylabel('Value')
+            plt.ylabel('Expression Value')
             plt.legend()
             plt.grid(True)
             plt.savefig(os.path.join(save_dir, f'gene_{gene}_timeseries.png'))
@@ -593,62 +640,47 @@ def analyze_gene_predictions(model, val_sequences, val_labels, dataset,
         metrics_df = pd.DataFrame.from_dict(gene_metrics, orient='index')
         metrics_df.to_csv(os.path.join(save_dir, 'gene_metrics.csv'))
         
-        top_genes = metrics_df.nlargest(5, 'Correlation')
-        bottom_genes = metrics_df.nsmallest(5, 'Correlation')
+        # Plot top and bottom performing genes
+        plt.figure(figsize=(15, 6))
         
-        plt.figure(figsize=(12, 6))
+        plt.subplot(1, 2, 1)
+        top_genes = metrics_df.nlargest(5, 'Correlation')
+        plt.bar(top_genes.index, top_genes['Correlation'])
+        plt.title('Top 5 Best Predicted Genes')
+        plt.xticks(rotation=45)
+        
         plt.subplot(1, 2, 2)
+        bottom_genes = metrics_df.nsmallest(5, 'Correlation')
         plt.bar(bottom_genes.index, bottom_genes['Correlation'])
         plt.title('Top 5 Worst Predicted Genes')
         plt.xticks(rotation=45)
+        
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, 'gene_performance_comparison.png'))
         plt.close()
-             
+        
         avg_corr = np.mean([m['Correlation'] for m in gene_metrics.values()])
         print(f"\nAverage Pearson Correlation: {avg_corr:.4f}")
         
-    return gene_metrics, avg_corr
-
-def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_TGCNWithInteractions'):
-    os.makedirs(save_dir, exist_ok=True)
-    
-    with torch.no_grad():
-        pred = model(val_sequences[0])
-        #target = torch.stack([g.x for g in val_labels[0]]).mean(dim=0)
-        target = torch.stack([g.x for g in val_labels[0]]).squeeze(dim=0)
-        
-        pred_np = pred.numpy()
-        target_np = target.numpy()
-        
-        pred_interactions = np.corrcoef(pred_np)
-        true_interactions = np.corrcoef(target_np)
-        
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7))
-        
-        sns.heatmap(true_interactions, ax=ax1, cmap='coolwarm')
-        ax1.set_title('True Interactions')
-        
-        sns.heatmap(pred_interactions, ax=ax2, cmap='coolwarm')
-        ax2.set_title('Predicted Interactions')
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'interaction_comparison.png'))
-        plt.close()
-        
-        interaction_corr = np.corrcoef(true_interactions.flatten(), 
-                                     pred_interactions.flatten())[0, 1]
-        
-        with open(os.path.join(save_dir, 'interaction_metrics.txt'), 'w') as f:
-            f.write(f'Interaction Correlation: {interaction_corr:.4f}\n')
-        
-        return interaction_corr
+        return gene_metrics, avg_corr
 
 def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_index, 
                              save_dir='plottings_TGCNWithInteractions'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     metrics = {}
+    
+    time_points = dataset.time_points
+    seq_length = dataset.seq_len
+    start_idx = split_index + seq_length
+    prediction_times = time_points[start_idx:]
+    
+    print("\nValidation Time Information:")
+    print(f"Original time points: {time_points}")
+    print(f"Split index: {split_index}")
+    print(f"Sequence length: {seq_length}")
+    print(f"Start index for predictions: {start_idx}")
+    print(f"Prediction times: {prediction_times}")
     
     with torch.no_grad():
         all_node_predictions = []
@@ -678,39 +710,55 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_
         interaction_preds = np.stack(all_interaction_predictions)
         true_interactions = np.stack(all_true_interactions)
         
-        # Calculate metrics
+        # Calculate node prediction metrics
         metrics['Overall'] = {
             'MSE': np.mean((predictions - targets) ** 2),
             'MAE': np.mean(np.abs(predictions - targets)),
             'RMSE': np.sqrt(np.mean((predictions - targets) ** 2)),
             'Pearson_Correlation': pearsonr(predictions.flatten(), targets.flatten())[0],
-            'Interaction_AUC': roc_auc_score(true_interactions.flatten(), 
-                                           interaction_preds.flatten())
+            'R2_Score': 1 - np.sum((predictions - targets) ** 2) / np.sum((targets - np.mean(targets)) ** 2)
         }
         
-        # Gene-wise metrics
+        # Calculate interaction metrics
+        pred_interactions = np.corrcoef(predictions.reshape(predictions.shape[0], -1))
+        true_interactions = np.corrcoef(targets.reshape(targets.shape[0], -1))
+        metrics['Overall']['Interaction_Correlation'] = np.corrcoef(pred_interactions.flatten(), 
+                                                                  true_interactions.flatten())[0, 1]
+        
+        # Gene-wise analysis
         genes = list(dataset.node_map.keys())
-        gene_metrics = {}
+        gene_correlations = []
+        temporal_correlations = []
         
         for i, gene in enumerate(genes):
             gene_pred = predictions[:, i, :]
             gene_target = targets[:, i, :]
             
             corr = pearsonr(gene_pred.flatten(), gene_target.flatten())[0]
-            gene_metrics[gene] = {
-                'Correlation': corr,
-                'MSE': np.mean((gene_pred - gene_target) ** 2)
-            }
+            gene_correlations.append(corr)
+            
+            # Calculate temporal correlation for this gene
+            for t in range(predictions.shape[2]):
+                temp_corr = pearsonr(predictions[:, i, t], targets[:, i, t])[0]
+                if not np.isnan(temp_corr):
+                    temporal_correlations.append(temp_corr)
         
         metrics['Gene_Performance'] = {
-            'Mean_Correlation': np.mean([m['Correlation'] for m in gene_metrics.values()]),
-            'Best_Genes': sorted(genes, 
-                               key=lambda g: gene_metrics[g]['Correlation'], 
-                               reverse=True)[:5],
-            'Worst_Genes': sorted(genes, 
-                                key=lambda g: gene_metrics[g]['Correlation'])[:5]
+            'Mean_Correlation': np.mean(gene_correlations),
+            'Median_Correlation': np.median(gene_correlations),
+            'Std_Correlation': np.std(gene_correlations),
+            'Best_Genes': [genes[i] for i in np.argsort(gene_correlations)[-5:]],
+            'Worst_Genes': [genes[i] for i in np.argsort(gene_correlations)[:5]]
         }
         
+        metrics['Temporal_Stability'] = {
+            'Mean_Temporal_Correlation': np.mean(temporal_correlations),
+            'Std_Temporal_Correlation': np.std(temporal_correlations),
+            'Min_Temporal_Correlation': np.min(temporal_correlations),
+            'Max_Temporal_Correlation': np.max(temporal_correlations)
+        }
+        
+        # Save detailed results
         with open(os.path.join(save_dir, 'evaluation_results.txt'), 'w') as f:
             f.write("Model Evaluation Results\n\n")
             for category, category_metrics in metrics.items():
@@ -790,9 +838,6 @@ if __name__ == "__main__":
 
     print("\nAnalyzing data structure...")
     seq_shape, label_shape = analyze_label_structure(val_seq, val_labels)
-    
-    print("\nGetting raw predictions...")
-    pred, target = get_raw_predictions(model, val_seq, val_labels)
 
     #print("\nEvaluating model with direct values...")
     #evaluate_model_with_direct_values(model, val_seq, val_labels, dataset)
@@ -807,8 +852,13 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.savefig('plottings_TGCNWithInteractions/training_progress.png')
 
-    #print("\nAnalyzing predictions...")
-    #gene_metrics, avg_corr = analyze_gene_predictions(model, val_seq, val_labels, dataset)
+    print("\nAnalyzing predictions...")
+    node_pred, interaction_pred, target = get_raw_predictions(model, val_seq, val_labels)
+
+    print("\nAnalyzing gene predictions...")
+    gene_metrics, avg_corr = analyze_gene_predictions(model, val_seq, val_labels, dataset)
+
+    print("\nAnalyzing interactions...")
     interaction_corr = analyze_interactions(model, val_seq, val_labels, dataset)
     
     #print("\nPrediction Summary:")
