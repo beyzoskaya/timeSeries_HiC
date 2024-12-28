@@ -12,6 +12,7 @@ import seaborn as sns
 from node2vec import Node2Vec
 from scipy.stats import pearsonr
 from sklearn.metrics import roc_auc_score
+from collections import defaultdict
 from models import TemporalGNN, TGCNWithInteractions
 
 def clean_gene_name(gene_name):
@@ -429,7 +430,7 @@ def split_temporal_sequences(sequences, labels, train_size=0.8):
 
 def train_model_with_early_stopping_combined_loss(
     model, train_sequences, train_labels, val_sequences, val_labels, 
-    num_epochs=100, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-4):
+    num_epochs=70, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-4):
     
     save_dir = 'plottings_TGCNWithInteractions'
     os.makedirs(save_dir, exist_ok=True)
