@@ -316,17 +316,17 @@ class TemporalGraphDataset:
 
         return sequences, labels
     
-def process_batch(seq,label):
-
-    # Stack sequence [seq_len, num_nodes, features] --> [5,52,32]
-    x = torch.stack([g.x for g in seq])
-
-    # Reshape for stgcn
-    x = x.permute(2,0,1).unsquueze(0) # [32,5,52] --> [1, 32, 5, 52]
-
-    target = torch.stack([g.x for g in label]) # [seq_len, 52, 32]
-    target = target.permute(2,0,1).unsquueze(0) # [1, 32, 5, 52]
-
+def process_batch(seq, label):
+    # Stack sequence [seq_len, num_nodes, features]
+    x = torch.stack([g.x for g in seq])  # [5, 52, 32]
+    
+    # Reshape for STGCN [batch, channels, time_steps, nodes]
+    x = x.permute(2, 0, 1).unsqueeze(0)  # [1, 32, 5, 52]  # Fixed typo
+    
+    # Process target - keeping temporal dimension the same
+    target = torch.stack([g.x for g in label])  # [seq_len, 52, 32]
+    target = target.permute(2, 0, 1).unsqueeze(0)  # [1, 32, seq_len, 52]
+    
     return x, target
 
 def calculate_correlation(tensor):
