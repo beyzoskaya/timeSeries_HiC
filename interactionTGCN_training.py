@@ -13,7 +13,7 @@ from node2vec import Node2Vec
 from scipy.stats import pearsonr
 from sklearn.metrics import roc_auc_score
 from collections import defaultdict
-from models import TemporalGNN, TGCNWithInteractions
+from models import TemporalGNN, TGCNWithInteractions, TemporalInteractionNet
 
 
 torch.manual_seed(42)
@@ -53,6 +53,7 @@ def analyze_label_structure(val_sequences, val_labels):
     print(f"Target: {label[0].x[0, :5]}")  # First node, first 5 features
     
     return seq[0].x.shape, label[0].x.shape
+###########################################################################
 
 class CombinedLossWithInteractions(nn.Module):
     def __init__(self, alpha=0.6, beta=0.2, gamma=0.2):
@@ -82,37 +83,39 @@ class CombinedLossWithInteractions(nn.Module):
             total_corr_loss += 1 - corr
         
         return total_corr_loss / num_nodes
-    
+
+class SimplifiedLoss(nn.Module):
+    def __init__(self, alpha=0.4, beta=0.4, gamma=0.2):
+        super(SimplifiedLoss, self).__init__()
+        self.alpha = alpha  # Node prediction weight
+        self.beta = beta    # Interaction weight
+        self.gamma = gamma  # Temporal weight
+        self.mse = nn.MSELoss()  # Add this line
+        
     def forward(self, node_pred, node_target, interaction_pred, true_edge_index):
-        """
-        Parameters:
-        -----------
-        node_pred : torch.Tensor [num_nodes, feat_dim]
-        node_target : torch.Tensor [num_nodes, feat_dim]
-        interaction_pred : torch.Tensor [num_nodes, num_nodes]
-        true_edge_index : torch.Tensor [2, num_edges]
-        """
         # Node prediction loss (MSE)
-        mse_loss = self.mse(node_pred, node_target)
+        node_loss = self.mse(node_pred, node_target)
         
-        # Temporal correlation loss
-        corr_loss = self.temporal_correlation_loss(node_pred, node_target)
-        
-        # Interaction loss
+        # Interaction loss (MSE)
         num_nodes = node_pred.size(0)
         true_adj = torch.zeros((num_nodes, num_nodes), device=node_pred.device)
         true_adj[true_edge_index[0], true_edge_index[1]] = 1
-        interaction_loss = self.bce(interaction_pred, true_adj)
+        interaction_loss = self.mse(interaction_pred, true_adj)
         
-        # Combine losses
-        total_loss = (self.alpha * mse_loss + 
-                     self.beta * corr_loss + 
-                     self.gamma * interaction_loss)
+        # Temporal consistency loss
+        temp_loss = self.mse(
+            node_pred[1:] - node_pred[:-1],
+            node_target[1:] - node_target[:-1]
+        )
+        
+        total_loss = (self.alpha * node_loss + 
+                     self.beta * interaction_loss + 
+                     self.gamma * temp_loss)
         
         return total_loss, {
-            "mse": mse_loss.item(),
-            "correlation": corr_loss.item(),
-            "interaction": interaction_loss.item()
+            "node": node_loss.item(),
+            "interaction": interaction_loss.item(),
+            "temporal": temp_loss.item()
         }
 
 class TemporalGraphDataset:
@@ -416,7 +419,7 @@ def analyze_label_distribution(model, val_sequences, val_labels, dataset):
     plt.title("Distribution of Label Values")
     plt.xlabel("Value")
     plt.ylabel("Frequency")
-    plt.savefig(f'plottings_TGCNWithInteractions/label_distribution.png')
+    plt.savefig(f'plottings_TGCNWithInteractionsAndAttention/label_distribution.png')
     plt.close()
 
 def split_temporal_sequences(sequences, labels, train_size=0.8):
@@ -434,9 +437,9 @@ def split_temporal_sequences(sequences, labels, train_size=0.8):
 
 def train_model_with_early_stopping_combined_loss(
     model, train_sequences, train_labels, val_sequences, val_labels, 
-    num_epochs=60, learning_rate=0.0001, patience=10, delta=1.0, threshold=1e-4):
+    num_epochs=100, learning_rate=0.0001, patience=100, delta=1.0, threshold=1e-4):
     
-    save_dir = 'plottings_TGCNWithInteractions'
+    save_dir = 'plottings_TGCNWithInteractionsAndAttention'
     os.makedirs(save_dir, exist_ok=True)
 
     print("\nChecking data ranges before training:")
@@ -448,7 +451,7 @@ def train_model_with_early_stopping_combined_loss(
         print(f"Label range: [{label_data.min():.4f}, {label_data.max():.4f}]")
     
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = CombinedLossWithInteractions(alpha=0.6, beta=0.2, gamma=0.2)
+    criterion = SimplifiedLoss(alpha=0.4, beta=0.4, gamma=0.2)
     best_val_loss = float('inf')
     patience_counter = 0
     
@@ -462,11 +465,9 @@ def train_model_with_early_stopping_combined_loss(
         for seq, label in zip(train_sequences, train_labels):
             optimizer.zero_grad()
             
-            # Get both node and interaction predictions
             node_pred, interaction_pred = model(seq)
             target = torch.stack([g.x for g in label]).squeeze(dim=0)
             
-            # Calculate loss
             loss, loss_components = criterion(
                 node_pred,
                 target,
@@ -502,10 +503,10 @@ def train_model_with_early_stopping_combined_loss(
         print(f'Epoch {epoch+1}/{num_epochs}')
         print(f'Training Loss: {train_loss:.4f}')
         print(f'Validation Loss: {val_loss:.4f}')
-        print(f'Loss Components - MSE: {loss_components["mse"]:.4f}, '
-              f'Correlation: {loss_components["correlation"]:.4f}, '
-              f'Interaction: {loss_components["interaction"]:.4f}\n')
-        
+        print(f'Loss Components - Node: {loss_components["node"]:.4f}, '
+              f'Interaction: {loss_components["interaction"]:.4f}, '
+              f'Temporal: {loss_components["temporal"]:.4f}\n')
+
         if val_loss < best_val_loss - threshold:
             best_val_loss = val_loss
             patience_counter = 0
@@ -556,7 +557,7 @@ def get_raw_predictions(model, val_sequences, val_labels):
         
         return node_pred, interaction_pred, target
 
-def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_TGCNWithInteractions'):
+def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_TGCNWithInteractionsAndAttention'):
     os.makedirs(save_dir, exist_ok=True)
     
     with torch.no_grad():
@@ -602,7 +603,7 @@ def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='pl
         return max(node_based_corr, direct_corr)
 
 def analyze_gene_predictions(model, val_sequences, val_labels, dataset, 
-                           save_dir='plottings_TGCNWithInteractions'):
+                           save_dir='plottings_TGCNWithInteractionsAndAttention'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     
@@ -703,7 +704,7 @@ def evaluate_temporal_correlations(predictions, targets):
     return temporal_correlations, gene_temporal_corrs
 
 def evaluate_temporal_performance(model, val_sequences, val_labels, dataset, 
-                              save_dir='plottings_TGCNWithInteractions'):
+                              save_dir='plottings_TGCNWithInteractionsAndAttention'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     
@@ -859,7 +860,7 @@ if __name__ == "__main__":
     print(f"Sequence length: {len(train_seq[0])}")
     print(f"Edge index shape: {train_seq[0][0].edge_index.shape}")
         
-    model = TGCNWithInteractions(
+    model = TemporalInteractionNet(
     num_nodes=dataset.num_nodes,
     in_channels=32,
     hidden_channels=64,
@@ -906,7 +907,7 @@ if __name__ == "__main__":
     plt.title('Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_TGCNWithInteractions/training_progress.png')
+    plt.savefig('plottings_TGCNWithInteractionsAndAttention/training_progress.png')
 
     print("\nAnalyzing predictions...")
     node_pred, interaction_pred, target = get_raw_predictions(model, val_seq, val_labels)
