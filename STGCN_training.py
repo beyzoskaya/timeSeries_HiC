@@ -145,10 +145,12 @@ class TemporalGraphDataset:
             
             # Stack features
             temporal_features[t] = torch.stack(features)
+
+            #for t, features in temporal_features.items():
+            #    print(f"Time {t}: Feature shape {features.shape}")
             
-            for t, features in temporal_features.items():
-                print(f"Time {t}: Feature shape {features.shape}")
-            
+            print(f"Sample Node2Vec embedding for a node: {temporal_features[self.time_points[0]][0, :5]}")
+
             # Verify dimensions for first time point
             if t == self.time_points[0]:
                 print(f"\nFeature verification for time {t}:")
@@ -202,6 +204,17 @@ class TemporalGraphDataset:
             label_graphs = [self.get_pyg_graph(t) for t in 
                           self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]]
             
+            #print(f"Sequence graphs: {[g.x.shape for g in seq_graphs]}")
+            #print(f"Label graphs: {[g.x.shape for g in label_graphs]}")
+
+            #for graph in seq_graphs[:1]:  # Check only the first sequence graph
+            #    print(graph.edge_index)
+            
+            #print(f"Feature mean: {torch.cat([g.x for g in seq_graphs]).mean(dim=0)}")
+            #print(f"Feature std: {torch.cat([g.x for g in seq_graphs]).std(dim=0)}")
+            
+            #print(f"Label graphs (sample): {[g.x.shape for g in label_graphs[:3]]}")
+
             #input_times = self.time_points[i:i+self.seq_len]
             target_times = self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]
             
@@ -241,8 +254,8 @@ class TemporalGraphDataset:
         return sequences, labels
     
 def process_batch(seq, label):
-    print(f"Length of seq: {len(seq)}")  # 5
-    print(f"Length of label: {len(label)}") # 1
+    #print(f"Length of seq: {len(seq)}")  # 5
+    #print(f"Length of label: {len(label)}") # 1
 
     # Stack sequence [seq_len, num_nodes, features]
     x = torch.stack([g.x for g in seq])  # [5, 52, 32]
@@ -302,12 +315,12 @@ def train_stgcn(dataset, val_ratio=0.2):
     model = STGCNChebGraphConv(args, args.blocks, args.n_vertex)
     model = model.float() # convert model to float otherwise I am getting type error
 
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=0.0005)
     criterion = nn.MSELoss()
 
-    num_epochs = 100
+    num_epochs = 50
     best_val_loss = float('inf')
-    patience = 100
+    patience = 10
     patience_counter = 0
     save_dir = 'plottings_STGCN'
     os.makedirs(save_dir, exist_ok=True)
@@ -327,10 +340,10 @@ def train_stgcn(dataset, val_ratio=0.2):
             #print(f"Shape of x inside training: {x.shape}") # --> [1, 32, 5, 52]
             #print(f"Shape of target inside training: {target.shape}") # --> [1, 32, 1, 52]
             output = model(x)
-            print(f"Shape of output: {output.shape}") # --> [1, 32, 5, 52]
+            #print(f"Shape of output: {output.shape}") # --> [1, 32, 5, 52]
 
             #target = target[:,:,-1:, :]
-            print(f"Shape of target: {target.shape}") # --> [32, 1, 52]
+            #print(f"Shape of target: {target.shape}") # --> [32, 1, 52]
             loss = criterion(output, target)
 
             loss.backward()
@@ -346,15 +359,15 @@ def train_stgcn(dataset, val_ratio=0.2):
                 x, target = process_batch(seq,label)
                 
                 output = model(x)
-                print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
-                print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
+                #print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
+                #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
                 val_loss = criterion(output, target)
 
                 output_corr = calculate_correlation(output)
-                print(f"Shape of output corr: {output_corr.shape}") # [32, 32]
+                #print(f"Shape of output corr: {output_corr.shape}") # [32, 32]
                 target_corr = calculate_correlation(target)
-                print(f"Shape of target corr: {target_corr.shape}") # [32, 32]
+                #print(f"Shape of target corr: {target_corr.shape}") # [32, 32]
                 int_loss = F.mse_loss(output_corr, target_corr)
                 epoch_interaction_loss += int_loss.item()
         
@@ -414,7 +427,70 @@ def train_stgcn(dataset, val_ratio=0.2):
     plt.savefig(f'{save_dir}/training_progress.png')
     plt.close()
     
-    return model, train_losses, val_losses  
+    return model, val_sequences, val_labels, train_losses, val_losses  
+
+def analyze_interactions(model, val_sequences, val_labels, dataset):
+    """Analyzes the preservation of gene-gene interactions."""
+    model.eval()
+    all_predicted = []
+    all_true = []
+    
+    with torch.no_grad():
+        for seq, label in zip(val_sequences, val_labels):
+            x, target = process_batch(seq, label)  # Shape: [1, 32, seq_len, 52]
+            output = model(x)  # Shape: [1, 32, seq_len, 52]
+            
+            # Extract predicted interactions (correlation between genes)
+            predicted_corr = calculate_correlation(output)  # [channels, channels]
+            true_corr = calculate_correlation(target)  # [channels, channels]
+            
+            # Collect results for interaction loss
+            all_predicted.append(predicted_corr.cpu().numpy())
+            all_true.append(true_corr.cpu().numpy())
+    
+    # Average the interaction losses
+    predicted_interactions = np.concatenate(all_predicted, axis=0)
+    true_interactions = np.concatenate(all_true, axis=0)
+    
+    # Calculate interaction loss (mean squared error)
+    interaction_loss = np.mean((predicted_interactions - true_interactions) ** 2)
+    
+    print(f"Interaction Preservation (MSE between predicted and true interaction matrix): {interaction_loss:.4f}")
+    
+    return interaction_loss
+
+def analyze_gene(model, val_sequences, val_labels, dataset):
+    """Analyzes the gene prediction performance over time for validation sequences."""
+    model.eval()
+    all_predicted = []
+    all_true = []
+    
+    with torch.no_grad():
+        for seq, label in zip(val_sequences, val_labels):
+            x, target = process_batch(seq, label)  # Shape: [1, 32, seq_len, 52]
+            output = model(x)  # Shape: [1, 32, seq_len, 52]
+            
+            # Flatten and store predicted and true values
+            all_predicted.append(output.squeeze(0).cpu().numpy())  # Remove batch dim
+            all_true.append(target.squeeze(0).cpu().numpy())
+    
+    # Flatten the list to a 2D array (time * nodes) for evaluation
+    all_predicted = np.concatenate(all_predicted, axis=1)  # [channels, time_steps * nodes]
+    all_true = np.concatenate(all_true, axis=1)
+    
+    # Pearson correlation coefficient between predicted and true gene expressions
+    gene_corrs = []
+    for gene_idx in range(all_true.shape[0]):  # Iterate over genes
+        corr, _ = pearsonr(all_predicted[gene_idx], all_true[gene_idx])
+        gene_corrs.append(corr)
+    
+    mean_corr = np.mean(gene_corrs)
+    
+    print(f"Mean Pearson Correlation between predicted and true gene expressions: {mean_corr:.4f}")
+    
+    return mean_corr
+
+
 
 class Args:
     def __init__(self):
@@ -441,7 +517,7 @@ if __name__ == "__main__":
         pred_len=1
     )
     
-    model, train_losses, val_losses = train_stgcn(dataset, val_ratio=0.2)
+    model, val_sequences,val_labels, train_losses, val_losses = train_stgcn(dataset, val_ratio=0.2)
     
     plt.figure(figsize=(10, 6))
     plt.plot(train_losses, label='Training Loss')
@@ -453,3 +529,6 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.savefig('stgcn_training_progress.png')
     plt.close()
+
+    interaction_corr = analyze_interactions(model, val_sequences, val_labels, dataset)
+    mean_corr = analyze_gene(model, val_sequences, val_labels, dataset)
