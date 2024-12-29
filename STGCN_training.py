@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
 import networkx as nx
@@ -14,7 +15,8 @@ from scipy.stats import pearsonr
 from STGCN.model.models import *
 import sys
 sys.path.append('./STGCN')
-from STGCN.model.models import STGCNGraphConv
+from STGCN.model.models import STGCNChebGraphConv
+import argparse
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -312,64 +314,182 @@ class TemporalGraphDataset:
         
         print(f"\nCreated {len(sequences)} sequences")
 
-        """
-        Created sequence for times: [16.0, 17.0, 18.0, 19.0, 20.0] with targets: [21.0]
-        Created sequence for times: [17.0, 18.0, 19.0, 20.0, 21.0] with targets: [22.0]
-        Created sequence for times: [18.0, 19.0, 20.0, 21.0, 22.0] with targets: [23.0]
-        Created sequence for times: [19.0, 20.0, 21.0, 22.0, 23.0] with targets: [24.0]
-        Created sequence for times: [20.0, 21.0, 22.0, 23.0, 24.0] with targets: [25.0]
-        Created sequence for times: [21.0, 22.0, 23.0, 24.0, 25.0] with targets: [26.0]
-        Created sequence for times: [22.0, 23.0, 24.0, 25.0, 26.0] with targets: [27.0]
-        Created sequence for times: [23.0, 24.0, 25.0, 26.0, 27.0] with targets: [28.0]
-        """
-
         return sequences, labels
     
-    def get_stgcn_format(self):
-        # Create adjacency matrix
-        adj = torch.zeros((self.num_nodes, self.num_nodes))
-        adj[self.edge_index[0], self.edge_index[1]] = 1
-        adj[self.edge_index[1], self.edge_index[0]] = 1  # Make symmetric
-        
-        # Normalize 
-        deg = torch.sum(adj, dim=1)
-        deg_inv_sqrt = torch.pow(deg, -0.5)
-        deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0.
-        norm_adj = torch.mm(torch.mm(torch.diag(deg_inv_sqrt), adj), torch.diag(deg_inv_sqrt))
-        
-        # Create features [batch, channels, timesteps, num_nodes]
-        features = torch.stack([self.node_features[t] for t in self.time_points])
-        features = features.permute(1, 2, 0)  # [num_nodes, features, timesteps]
-        features = features.unsqueeze(0)  # Add batch dimension
+def process_batch(seq,label):
 
-        return {
-            'x': features,  # [1, num_nodes, features, timesteps]
-            'adj': norm_adj  # [num_nodes, num_nodes]
-        }
+    # Stack sequence [seq_len, num_nodes, features] --> [5,52,32]
+    x = torch.stack([g.x for g in seq])
 
-    def get_temporal_sequences_stgcn(self):
-        data = self.get_stgcn_format()
-        sequences = []
-        labels = []
+    # Reshape for stgcn
+    x = x.permute(2,0,1).unsquueze(0) # [32,5,52] --> [1, 32, 5, 52]
+
+    target = torch.stack([g.x for g in label]) # [seq_len, 52, 32]
+    target = target.permute(2,0,1).unsquueze(0) # [1, 32, 5, 52]
+
+    return x, target
+
+def calculate_correlation(tensor):
+    # tensor shape: [batch, channels, time, nodes]
+    # Reshape to 2D for correlation
+    tensor = tensor.squeeze(0) # remove batch
+    tensor = tensor.view(tensor.size(0), -1) # [channels, time*nodes]
+    return torch.corrcoef(tensor)
+
+def train_stgcn(dataset, val_ratio=0.2):
+
+    args = Args()
+    args.n_vertex = dataset.num_nodes
+
+    print(f"\nModel Configuration:")
+    print(f"Number of nodes: {args.n_vertex}")
+    print(f"Historical sequence length: {args.n_his}")
+    print(f"Block structure: {args.blocks}")
+
+    # sequences with labels
+    sequences, labels = dataset.get_temporal_sequences()
+    print(f"\nCreated {len(sequences)} sequences")
+
+    # calculate GSO
+    edge_index = sequences[0][0].edge_index
+    edge_weight = sequences[0][0].edge_attr.squeeze() if sequences[0][0].edge_attr is not None else None
+
+    adj = torch.zeros((args.n_vertex, args.n_vertex)) # symmetric matrix
+    adj[edge_index[0], edge_index[1]] = 1 if edge_weight is None else edge_weight # diagonal vs nondiagonal elements for adj matrix
+    D = torch.diag(torch.sum(adj, dim=1) ** (-0.5))
+    args.gso = torch.eye(args.n_vertex) - D @ adj @ D
+
+    # Split data into train and validation
+    n_samples = len(sequences)
+    n_train = int(n_samples * (1 - val_ratio))
+    train_sequences = sequences[:n_train]
+    train_labels = labels[:n_train]
+    val_sequences = sequences[n_train:]
+    val_labels = labels[n_train:]
+
+    print(f"\nData Split:")
+    print(f"Training sequences: {len(train_sequences)}")
+    print(f"Validation sequences: {len(val_sequences)}")
+
+    # Initialize STGCN
+    model = STGCNChebGraphConv(args, args.blocks, args.n_vertex)
+    model = model.float() # convert model to float otherwise I am getting type error
+
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.MSELoss()
+
+    num_epochs = 100
+    best_val_loss = float('inf')
+    patience = 10
+    patience_counter = 0
+    save_dir = 'plottings_STGCN'
+    os.makedirs(save_dir, exist_ok=True)
+
+    train_losses = []
+    val_losses = []
+    interaction_losses = []
+
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+
+        for seq,label in zip(train_sequences, train_labels):
+            optimizer.zero_grad()
+
+            x, target = process_batch(seq,label)
+            output = model(x)
+
+            target = target[:,:,-1:, :]
+            loss = criterion(output, target)
+
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+        model.eval()
+        val_loss = 0
+        epoch_interaction_loss = 0
+
+        with torch.no_grad():
+            for seq,label in zip(val_sequences, val_labels):
+                x, target = process_batch(seq,label)
+                output = model(x)
+
+                target = target[:,:,-1:, :]
+                val_loss = criterion(output, target)
+
+                output_corr = calculate_correlation(output)
+                target_corr = calculate_correlation(target)
+                int_loss = F.mse_loss(output_corr, target_corr)
+                epoch_interaction_loss += int_loss.item()
         
-        features = data['x'].squeeze(0)  # [num_nodes, features, timesteps]
+        # Calculate average losses
+        avg_train_loss = total_loss / len(train_sequences)
+        avg_val_loss = val_loss / len(val_sequences)
+        avg_interaction_loss = epoch_interaction_loss / len(val_sequences)
         
-        for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
-            # [batch, features, timesteps, num_nodes]
-            seq_x = features[..., i:i+self.seq_len]  # [num_nodes, features, seq_len]
-            seq_x = seq_x.permute(1, 2, 0)  # [features, seq_len, num_nodes]
-            seq_x = seq_x.unsqueeze(0)  # [1, features, seq_len, num_nodes]
-            
-            label_x = features[..., i+self.seq_len:i+self.seq_len+self.pred_len]
-            label_x = label_x.permute(1, 2, 0)
-            label_x = label_x.unsqueeze(0)
-            
-            sequences.append({'x': seq_x, 'adj': data['adj']})
-            labels.append(label_x)
-            
-        print(f"Final sequence shape: {sequences[0]['x'].shape}")
-        return sequences, labels
-   
+        train_losses.append(avg_train_loss)
+        val_losses.append(avg_val_loss)
+        interaction_losses.append(avg_interaction_loss)
+        
+        print(f'Epoch {epoch+1}/{num_epochs}')
+        print(f'Training Loss: {avg_train_loss:.4f}')
+        print(f'Validation Loss: {avg_val_loss:.4f}')
+        print(f'Interaction Loss: {avg_interaction_loss:.4f}\n')
+        
+        # Early stopping
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_val_loss,
+            }, f'{save_dir}/best_model.pth')
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered.")
+                break
+
+    # Load best model
+    checkpoint = torch.load(f'{save_dir}/best_model.pth')
+    model.load_state_dict(checkpoint['model_state_dict'])
+    
+    # Plot training progress
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label='Train')
+    plt.plot(val_losses, label='Validation')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(interaction_losses, label='Interaction Loss')
+    plt.title('Interaction Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig(f'{save_dir}/training_progress.png')
+    plt.close()
+    
+    return model, train_losses, val_losses  
+
+
+
+
+
+
+
+
+
+
 def analyze_label_distribution(model, val_sequences, val_labels, dataset):
     """Analyze the distribution of label values"""
     print("\nAnalyzing label value distribution...")
@@ -396,188 +516,6 @@ def analyze_label_distribution(model, val_sequences, val_labels, dataset):
     plt.savefig(f'plottings_STGCN_temporal_graph/label_distribution.png')
     plt.close()
 
-def split_temporal_sequences(sequences, labels, train_size=0.8):
-    """Split sequences while maintaining temporal order"""
-    split_index = int(len(sequences) * train_size)
-    
-    train_seq = sequences[:split_index]
-    print(f" Length of train_seq: {len(train_seq)}")
-    train_labels = labels[:split_index]
-    test_seq = sequences[split_index:]
-    print(f" Length of test_seq: {len(test_seq)}")
-    test_labels = labels[split_index:]
-    
-    return train_seq, train_labels, test_seq, test_labels
-
-def train_model_with_early_stopping_combined_loss(
-    model, train_sequences, train_labels, val_sequences, val_labels, 
-    num_epochs=100, learning_rate=0.0001, patience=10, threshold=1e-4):
-    
-    save_dir = 'plottings_STGCN_temporal_graph'
-    os.makedirs(save_dir, exist_ok=True)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = CombinedLoss(alpha=0.6, beta=0.4)
-    best_val_loss = float('inf')
-    patience_counter = 0
-    
-    train_losses = []
-    val_losses = []
-    
-    for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0
-        
-        for seq, label in zip(train_sequences, train_labels):
-            optimizer.zero_grad()
-            
-            x = seq['x'].permute(0, 3, 2, 1) 
-            print(f"Shape of x before passing to model: {x.shape}") # --> 1, 1, 5, 32, 43] with unsqueeze [1, 5, 32, 43] without unsqueeze
-            output = model(x)
-            target = label.permute(0, 3, 2, 1)
-            print(f"Shape of target in training: {target.shape}")
-            
-            loss = criterion(output, target)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for seq, label in zip(val_sequences, val_labels):
-                x = seq['x'].squeeze()
-                x = x.permute(0, 3, 1, 2)
-                print(f"Shape of x before passing to model: {x.shape}")
-                output = model(x)
-                target = label.squeeze()
-                val_loss += criterion(output, target).item()
-        
-        train_loss = total_loss / len(train_sequences)
-        val_loss = val_loss / len(val_sequences)
-        
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        
-        print(f'Epoch {epoch+1}/{num_epochs}')
-        print(f'Training Loss: {train_loss:.4f}')
-        print(f'Validation Loss: {val_loss:.4f}\n')
-        
-        if val_loss < best_val_loss - threshold:
-            best_val_loss = val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), f'{save_dir}/best_model.pth')
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print("Early stopping triggered.")
-                break
-    
-    model.load_state_dict(torch.load(f'{save_dir}/best_model.pth'))
-    return train_losses, val_losses
-
-def analyze_gene_predictions(model, val_sequences, val_labels, dataset, 
-                           save_dir='plottings_STGCN_temporal_graph'):
-    os.makedirs(save_dir, exist_ok=True)
-    model.eval()
-    
-    with torch.no_grad():
-        all_predictions = []
-        all_targets = []
-        
-        for seq, label in zip(val_sequences, val_labels):
-            pred = model(seq)
-            #target = torch.stack([g.x for g in label]).mean(dim=0)
-            target = torch.stack([g.x for g in label]).squeeze(dim=0)
-            all_predictions.append(pred.numpy())
-            all_targets.append(target.numpy())
-        
-        predictions = np.stack(all_predictions)
-        targets = np.stack(all_targets)
-        
-        genes = list(dataset.node_map.keys())
-        gene_metrics = {}
-        
-        for i, gene in enumerate(genes):
-            gene_pred = predictions[:, i, :]
-            gene_target = targets[:, i, :]
-            
-            corr = pearsonr(gene_pred.flatten(), gene_target.flatten())[0]
-            mse = np.mean((gene_pred - gene_target) ** 2)
-            mae = np.mean(np.abs(gene_pred - gene_target))
-            
-            gene_metrics[gene] = {
-                'MSE': mse,
-                'MAE': mae,
-                'Correlation': corr
-            }
-            
-            # Plot individual gene predictions
-            plt.figure(figsize=(10, 6))
-            plt.plot(gene_pred[0], label='Predicted', alpha=0.7)
-            plt.plot(gene_target[0], label='Actual', alpha=0.7)
-            plt.title(f'Time Series Prediction for {gene}')
-            plt.xlabel('Time Step')
-            plt.ylabel('Value')
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(os.path.join(save_dir, f'gene_{gene}_timeseries.png'))
-            plt.close()
-        
-        # Save metrics and create summary plots
-        metrics_df = pd.DataFrame.from_dict(gene_metrics, orient='index')
-        metrics_df.to_csv(os.path.join(save_dir, 'gene_metrics.csv'))
-        
-        top_genes = metrics_df.nlargest(5, 'Correlation')
-        bottom_genes = metrics_df.nsmallest(5, 'Correlation')
-        
-        plt.figure(figsize=(12, 6))
-        plt.subplot(1, 2, 2)
-        plt.bar(bottom_genes.index, bottom_genes['Correlation'])
-        plt.title('Top 5 Worst Predicted Genes')
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'gene_performance_comparison.png'))
-        plt.close()
-             
-        avg_corr = np.mean([m['Correlation'] for m in gene_metrics.values()])
-        print(f"\nAverage Pearson Correlation: {avg_corr:.4f}")
-        
-    return gene_metrics, avg_corr
-
-def analyze_interactions(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCN_temporal_graph'):
-    os.makedirs(save_dir, exist_ok=True)
-    
-    with torch.no_grad():
-        pred = model(val_sequences[0])
-        #target = torch.stack([g.x for g in val_labels[0]]).mean(dim=0)
-        target = torch.stack([g.x for g in val_labels[0]]).squeeze(dim=0)
-        
-        pred_np = pred.numpy()
-        target_np = target.numpy()
-        
-        pred_interactions = np.corrcoef(pred_np)
-        true_interactions = np.corrcoef(target_np)
-        
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7))
-        
-        sns.heatmap(true_interactions, ax=ax1, cmap='coolwarm')
-        ax1.set_title('True Interactions')
-        
-        sns.heatmap(pred_interactions, ax=ax2, cmap='coolwarm')
-        ax2.set_title('Predicted Interactions')
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'interaction_comparison.png'))
-        plt.close()
-        
-        interaction_corr = np.corrcoef(true_interactions.flatten(), 
-                                     pred_interactions.flatten())[0, 1]
-        
-        with open(os.path.join(save_dir, 'interaction_metrics.txt'), 'w') as f:
-            f.write(f'Interaction Correlation: {interaction_corr:.4f}\n')
-        
-        return interaction_corr
 
 def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_index, save_dir='plottings_STGCN_temporal_graph'):
     os.makedirs(save_dir, exist_ok=True)
@@ -736,122 +674,40 @@ def evaluate_model_with_direct_values(model, val_sequences, val_labels, dataset,
                 print("Predicted:", gene_pred)
                 print("Actual:", gene_target)
     
-def split_temporal_sequences(sequences, labels, train_size=0.8):
-    """Split sequences while maintaining temporal order and return indices"""
-    split_index = int(len(sequences) * train_size)
-    
-    print("\nSplit Information:")
-    print(f"Total sequences: {len(sequences)}")
-    print(f"Split index: {split_index}")
-    print(f"Training sequences: {split_index}")
-    print(f"Validation sequences: {len(sequences) - split_index}")
-
-    train_seq = sequences[:split_index]
-    train_labels = labels[:split_index]
-    val_seq = sequences[split_index:]
-    val_labels = labels[split_index:]
-
-    return train_seq, train_labels, val_seq, val_labels, split_index
+class Args:
+    def __init__(self):
+        self.Kt = 3  # temporal kernel size
+        self.Ks = 3  # spatial kernel size
+        self.n_his = 5  # historical sequence length
+        self.n_pred = 1
+        # Modified block structure with fewer ST blocks
+        self.blocks = [
+            [32, 32, 32],    # Input block
+            [32, 32, 32],    # Single ST block (since temporal dim reduces quickly)
+            [32, 32, 1]      # Output block
+        ]
+        self.act_func = 'glu'
+        self.graph_conv_type = 'cheb_graph_conv'
+        self.enable_bias = True
+        self.droprate = 0.3
 
 if __name__ == "__main__":
-
-    class Args:
-        def __init__(self, adj_matrix):
-            self.Kt = 3 
-            self.Ks = 3
-            self.n_his = 5
-            self.act_func = 'relu'
-            self.graph_conv_type = 'graph_conv'
-            self.gso = adj_matrix
-            self.enable_bias = True
-            self.droprate = 0.3
-
     dataset = TemporalGraphDataset(
         csv_file='mapped/enhanced_interactions.csv',
         embedding_dim=32,
         seq_len=5,
         pred_len=1
     )
-    sequences, labels = dataset.get_temporal_sequences_stgcn()
-    train_seq, train_labels, val_seq, val_labels,split_index = split_temporal_sequences(sequences, labels, train_size=0.8)
-    adj_matrix = dataset.get_stgcn_format()['adj']
-    args = Args(adj_matrix)
-    sequences, labels = dataset.get_temporal_sequences_stgcn()
-    blocks = [
-    [32, 32, 32],  # First ST-Conv block
-    [32, 32, 32],  # Second ST-Conv block
-    [32, 32],      # Output block fully connected layers
-    [32, 1]        # Final prediction
-]
-    print(f"Number of nodes: {dataset.num_nodes}")
-    model = STGCNGraphConv(args, blocks, n_vertex=dataset.num_nodes).float()
     
-    def convert_sequences_to_float32(data):
-        if isinstance(data, list):
-            if all(isinstance(x, dict) for x in data):  # STGCN sequence format
-                return [{
-                    'x': seq['x'].float() if torch.is_tensor(seq['x']) else torch.tensor(seq['x'], dtype=torch.float32),
-                    'adj': seq['adj'].float() if torch.is_tensor(seq['adj']) else torch.tensor(seq['adj'], dtype=torch.float32)
-                } for seq in data]
-            elif all(torch.is_tensor(x) for x in data):  # Label format
-                return [x.float() for x in data]
-            else:  # Original graph sequence format
-                return [Data(
-                    x=graph.x.float(),
-                    edge_index=graph.edge_index,
-                    edge_attr=graph.edge_attr.float() if graph.edge_attr is not None else None,
-                    num_nodes=graph.num_nodes
-                ) for graph in data]
-        elif torch.is_tensor(data):  # Single tensor
-            return data.float()
-        return data
+    model, train_losses, val_losses = train_stgcn(dataset, val_ratio=0.2)
     
-    # converted all sequences to float also for consistency
-    train_seq = convert_sequences_to_float32(train_seq)
-    train_labels = convert_sequences_to_float32(train_labels)
-    val_seq = convert_sequences_to_float32(val_seq)
-    val_labels = convert_sequences_to_float32(val_labels)
-
-    #analyze_label_distribution(model, val_seq, val_labels, dataset) # analyze labels before training!
-
-    train_losses, val_losses = train_model_with_early_stopping_combined_loss(
-        model, train_seq, train_labels, val_seq, val_labels
-    )
-
-    print("\nAnalyzing data structure...")
-    seq_shape, label_shape = analyze_label_structure(val_seq, val_labels)
-    
-    print("\nGetting raw predictions...")
-    pred, target = get_raw_predictions(model, val_seq, val_labels)
-
-    #print("\nEvaluating model with direct values...")
-    #evaluate_model_with_direct_values(model, val_seq, val_labels, dataset)
-
     plt.figure(figsize=(10, 6))
     plt.plot(train_losses, label='Training Loss')
     plt.plot(val_losses, label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('Training Progress')
+    plt.title('STGCN Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('plottings_STGCN_temporal_graph/training_progress.png')
-
-    #print("\nAnalyzing predictions...")
-    #gene_metrics, avg_corr = analyze_gene_predictions(model, val_seq, val_labels, dataset)
-    interaction_corr = analyze_interactions(model, val_seq, val_labels, dataset)
-    
-    #print("\nPrediction Summary:")
-    #print(f"Average Gene Correlation: {np.mean([m['Correlation'] for m in gene_metrics.values()]):.4f}")
-    print(f"Interaction Preservation: {interaction_corr:.4f}")
-
-    metrics = evaluate_model_performance(model, val_seq, val_labels, dataset, split_index)
-    print("\nModel Performance Summary:")
-    print(f"Overall Pearson Correlation: {metrics['Overall']['Pearson_Correlation']:.4f}")
-    print(f"RMSE: {metrics['Overall']['RMSE']:.4f}")
-    print(f"R² Score: {metrics['Overall']['R2_Score']:.4f}")
-    print(f"\nGene-wise Performance:")
-    print(f"Mean Gene Correlation: {metrics['Gene_Performance']['Mean_Correlation']:.4f}")
-    print(f"Best Performing Genes: {', '.join(metrics['Gene_Performance']['Best_Genes'])}")
-    print(f"\nTemporal Stability:")
-    print(f"Mean Temporal Correlation: {metrics['Temporal_Stability']['Mean_Temporal_Correlation']:.4f}")
+    plt.savefig('stgcn_training_progress.png')
+    plt.close()
