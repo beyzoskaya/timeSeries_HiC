@@ -7,13 +7,7 @@ import numpy as np
 #from torch_geometric_temporal.nn.attention import STGCN
 from torch_geometric_temporal.nn.recurrent import DCRNN, A3TGCN, TGCN, AGCRN
 from torch_geometric.nn import GCNConv, ChebConv
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch_geometric_temporal.nn.recurrent import DCRNN, TGCN
-from torch_geometric.nn import GCNConv
-
+from torch_geometric.nn import GCNConv, TransformerConv
 
 class TemporalGNN(nn.Module):
     def __init__(self, num_nodes, in_channels, hidden_channels, out_channels, 
@@ -249,31 +243,64 @@ class TGCNWithInteractions(nn.Module):
         
         return node_predictions, interaction_matrix
 
-class TGCNWithInteractionsAndAttention(nn.Module):
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric_temporal.nn.recurrent import TGCN
+from torch_geometric.nn import GATConv
+
+class InteractionPredictor(nn.Module):
+    def __init__(self, hidden_channels):
+        super(InteractionPredictor, self).__init__()
+        self.hidden_channels = hidden_channels
+        
+        self.interaction_layer1 = nn.Linear(hidden_channels * 2, hidden_channels)
+        self.interaction_layer2 = nn.Linear(hidden_channels, 1)
+        
+    def forward(self, node_embeddings):
+        num_nodes = node_embeddings.size(0)
+        
+        node_i = node_embeddings.unsqueeze(1).repeat(1, num_nodes, 1)
+        node_j = node_embeddings.unsqueeze(0).repeat(num_nodes, 1, 1)
+        
+        pairs = torch.cat([node_i, node_j], dim=-1)
+        
+        h = torch.relu(self.interaction_layer1(pairs))
+        scores = self.interaction_layer2(h).squeeze(-1)
+        
+        return scores
+
+class TemporalInteractionNet(nn.Module):
     def __init__(self, num_nodes, in_channels, hidden_channels, out_channels):
-        super(TGCNWithInteractionsAndAttention, self).__init__()
+        super(TemporalInteractionNet, self).__init__()
         
         self.num_nodes = num_nodes
         self.hidden_channels = hidden_channels
         
-        # Base TGCN for temporal graph processing
+        # TGCN for temporal patterns
         self.tgcn = TGCN(in_channels=in_channels,
                          out_channels=hidden_channels)
         
-        # Temporal attention module
-        self.temporal_attention = TemporalAttention(hidden_channels)
+        # Transformer-based interaction learning
+        self.transform1 = TransformerConv(hidden_channels, hidden_channels)
+        self.transform2 = TransformerConv(hidden_channels, hidden_channels)
         
-        # Additional GCN layers for spatial processing
-        self.conv1 = GCNConv(hidden_channels, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        # Separate branches for temporal and interaction patterns
+        self.temporal_conv = nn.Conv1d(hidden_channels, hidden_channels, kernel_size=3, padding=1)
+        self.interaction_conv = GCNConv(hidden_channels, hidden_channels)
         
-        # Output projection
-        self.linear = nn.Linear(hidden_channels, out_channels)
+        # Skip connections
+        self.skip_linear = nn.Linear(hidden_channels, hidden_channels)
         
-        # Interaction predictor
-        self.interaction_predictor = InteractionPredictor(hidden_channels)
+        # Output layers
+        self.node_predictor = nn.Linear(hidden_channels * 2, out_channels)
+        self.interaction_predictor = nn.Sequential(
+            nn.Linear(hidden_channels * 2, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, 1)
+        )
         
-        # Layer normalization and dropout
+        # Regularization
         self.layer_norm1 = nn.LayerNorm(hidden_channels)
         self.layer_norm2 = nn.LayerNorm(hidden_channels)
         self.dropout = nn.Dropout(0.2)
@@ -288,34 +315,51 @@ class TGCNWithInteractionsAndAttention(nn.Module):
         seq_len, num_nodes, feat_dim = x.size()
         
         # Process each time step with TGCN
-        h_sequence = []
+        temporal_embeddings = []
         for t in range(seq_len):
-            h_t = self.tgcn(x[t], edge_index, edge_weight)  # [num_nodes, hidden_channels]
-            h_sequence.append(h_t)
+            h_t = self.tgcn(x[t], edge_index, edge_weight)
+            temporal_embeddings.append(h_t)
         
         # Stack temporal features
-        h = torch.stack(h_sequence, dim=1)  # [num_nodes, seq_len, hidden_channels]
+        h_temporal = torch.stack(temporal_embeddings, dim=1)  # [num_nodes, seq_len, hidden_channels]
         
-        # Apply temporal attention
-        h = self.temporal_attention(h)  # [num_nodes, hidden_channels]
+        # Temporal branch
+        h_t = h_temporal.transpose(1, 2)  # [num_nodes, hidden_channels, seq_len]
+        h_t = self.temporal_conv(h_t)
+        h_t = h_t.transpose(1, 2)  # [num_nodes, seq_len, hidden_channels]
+        h_t = torch.mean(h_t, dim=1)  # [num_nodes, hidden_channels]
         
-        # Store intermediate embeddings for interaction prediction
-        intermediate_embeddings = h.clone()
+        # Interaction branch with transformer
+        h_i = torch.mean(h_temporal, dim=1)  # [num_nodes, hidden_channels]
+        h_i = self.transform1(h_i, edge_index)
+        h_i = self.layer_norm1(h_i)
+        h_i = F.relu(h_i)
+        h_i = self.dropout(h_i)
         
-        # Spatial processing with GCN
-        h = self.conv1(h, edge_index, edge_weight)
-        h = self.layer_norm1(h)
-        h = self.dropout(torch.relu(h))
+        h_i = self.transform2(h_i, edge_index)
+        h_i = self.layer_norm2(h_i)
+        h_i = F.relu(h_i)
+        h_i = self.dropout(h_i)
         
-        h = self.conv2(h, edge_index, edge_weight)
-        h = self.layer_norm2(h)
-        h = self.dropout(torch.relu(h))
+        # Skip connection
+        h_skip = self.skip_linear(h_i)
+        h_i = h_i + h_skip
         
-        # Predict node features
-        node_predictions = self.linear(h)  # [num_nodes, out_channels]
+        # Combine temporal and interaction features
+        h_combined = torch.cat([h_t, h_i], dim=-1)  # [num_nodes, hidden_channels * 2]
         
-        # Predict interactions using intermediate embeddings
-        interaction_matrix = self.interaction_predictor(intermediate_embeddings)
+        # Node predictions
+        node_predictions = self.node_predictor(h_combined)
+        
+        # Interaction predictions
+        interaction_scores = []
+        for i in range(num_nodes):
+            for j in range(num_nodes):
+                node_pair = torch.cat([h_combined[i], h_combined[j]])
+                score = self.interaction_predictor(node_pair)
+                interaction_scores.append(score)
+        
+        interaction_matrix = torch.reshape(torch.stack(interaction_scores), (num_nodes, num_nodes))
         
         return node_predictions, interaction_matrix
     
