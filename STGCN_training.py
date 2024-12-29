@@ -24,85 +24,6 @@ def clean_gene_name(gene_name):
         return gene_name
     return gene_name.split('(')[0].strip()
 
-################# Analyze Data ######################
-def analyze_label_structure(val_sequences, val_labels):
-    """Analyze the structure of sequences and labels"""
-    print("\n=== Label Structure Analysis ===")
-    
-    # Look at first sequence and label
-    seq = val_sequences[0]
-    label = val_labels[0]
-    
-    print("\nSequence structure:")
-    print(f"Number of graphs in sequence: {len(seq)}")
-    print(f"First graph features shape: {seq[0].x.shape}")
-    print(f"Edge index shape: {seq[0].edge_index.shape}")
-    
-    print("\nLabel structure:")
-    print(f"Number of graphs in label: {len(label)}")
-    print(f"Label features shape: {label[0].x.shape}")
-    
-    # Look at actual values
-    print("\nExample values for first node:")
-    print("Sequence feature values:")
-    for i, g in enumerate(seq):
-        print(f"Time step {i}: {g.x[0, :5]}")  # First node, first 5 features
-    
-    print("\nLabel feature values:")
-    print(f"Target: {label[0].x[0, :5]}")  # First node, first 5 features
-    
-    return seq[0].x.shape, label[0].x.shape
-
-def get_raw_predictions(model, val_sequences, val_labels):
-    """Get predictions without any averaging"""
-    model.eval()
-    with torch.no_grad():
-        # Get one sequence prediction
-        seq = val_sequences[0]
-        label = val_labels[0]
-        
-        # Get prediction
-        pred = model(seq)
-        target = label[0].x  # Direct access without mean
-        
-        print("\n=== Prediction Analysis ===")
-        print(f"Raw prediction shape: {pred.shape}")
-        print(f"Raw target shape: {target.shape}")
-        
-        print("\nFirst node values:")
-        print(f"Predicted: {pred[0, :5]}")  # First node, first 5 features
-        print(f"Target: {target[0, :5]}")   # First node, first 5 features
-        
-        return pred, target
-
-class CombinedLoss(nn.Module):
-    def __init__(self, alpha=0.6, beta=0.4):
-        super(CombinedLoss, self).__init__()
-        self.alpha = alpha
-        self.beta = beta
-        self.mse = nn.MSELoss()
-        self.huber = nn.HuberLoss(delta=1.0)
-    
-    def forward(self, pred, target):
-        mse_loss = self.mse(pred, target)
-        huber_loss = self.huber(pred, target)
-        
-        # Correlation loss to preserve patterns
-        pred_flat = pred.view(-1)
-        target_flat = target.view(-1)
-        
-        vx = pred_flat - torch.mean(pred_flat)
-        vy = target_flat - torch.mean(target_flat)
-        
-        corr = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)) + 1e-12)
-        corr_loss = 1 - corr
-        
-        return self.alpha * (0.5 * mse_loss + 0.5 * huber_loss) + self.beta * corr_loss
-
-"""
-number of nodes in the graph. 52
-43 time points
-"""
 class TemporalGraphDataset:
     def __init__(self, csv_file, embedding_dim=64, seq_len=5, pred_len=1): # I change the seq_len to more lower value
         self.seq_len = seq_len
@@ -395,11 +316,15 @@ def train_stgcn(dataset, val_ratio=0.2):
 
         for seq,label in zip(train_sequences, train_labels):
             optimizer.zero_grad()
-
+            
             x, target = process_batch(seq,label)
+            #print(f"Shape of x inside training: {x.shape}") # --> [1, 32, 5, 52]
+            #print(f"Shape of target inside training: {target.shape}") # --> [1, 32, 1, 52]
             output = model(x)
+            #print(f"Shape of output: {output.shape}")
 
-            target = target[:,:,-1:, :]
+            #target = target[:,:,-1:, :]
+            #print(f"Shape of target[:,:,-1:, :]: {target[:,:,-1:, :].shape}")
             loss = criterion(output, target)
 
             loss.backward()
@@ -415,7 +340,7 @@ def train_stgcn(dataset, val_ratio=0.2):
                 x, target = process_batch(seq,label)
                 output = model(x)
 
-                target = target[:,:,-1:, :]
+                #target = target[:,:,-1:, :]
                 val_loss = criterion(output, target)
 
                 output_corr = calculate_correlation(output)
@@ -481,199 +406,6 @@ def train_stgcn(dataset, val_ratio=0.2):
     
     return model, train_losses, val_losses  
 
-
-
-
-
-
-
-
-
-
-def analyze_label_distribution(model, val_sequences, val_labels, dataset):
-    """Analyze the distribution of label values"""
-    print("\nAnalyzing label value distribution...")
-    
-    all_labels = []
-    for label_seq in val_labels:
-        #label_tensor = torch.stack([g.x for g in label_seq]).mean(dim=0)
-        label_tensor = torch.stack([g.x for g in label_seq]).squeeze(dim=0)
-        all_labels.append(label_tensor.numpy())
-    
-    all_labels = np.concatenate(all_labels, axis=0)
-    
-    print(f"Label statistics:")
-    print(f"Mean: {np.mean(all_labels):.4f}")
-    print(f"Std: {np.std(all_labels):.4f}")
-    print(f"Min: {np.min(all_labels):.4f}")
-    print(f"Max: {np.max(all_labels):.4f}")
-    
-    plt.figure(figsize=(10, 6))
-    plt.hist(all_labels.flatten(), bins=50)
-    plt.title("Distribution of Label Values")
-    plt.xlabel("Value")
-    plt.ylabel("Frequency")
-    plt.savefig(f'plottings_STGCN_temporal_graph/label_distribution.png')
-    plt.close()
-
-
-def evaluate_model_performance(model, val_sequences, val_labels, dataset, split_index, save_dir='plottings_STGCN_temporal_graph'):
-    os.makedirs(save_dir, exist_ok=True)
-    model.eval()
-    metrics = {}
-   
-    time_points = dataset.time_points
-    seq_length = dataset.seq_len
-    start_idx = split_index + seq_length
-    prediction_times = time_points[start_idx:]
-    
-    print("\nValidation Time Information:")
-    print(f"Original time points: {time_points}")
-    print(f"Split index: {split_index}")
-    print(f"Sequence length: {seq_length}")
-    print(f"Start index for predictions: {start_idx}")
-    print(f"Prediction times: {prediction_times}")
-
-    with torch.no_grad():
-        all_predictions = []
-        all_targets = []
-        
-        for seq, label in zip(val_sequences, val_labels):
-            pred = model(seq)
-            #target = torch.stack([g.x for g in label]).mean(dim=0)
-            target = torch.stack([g.x for g in label]).squeeze(dim=0)
-            all_predictions.append(pred.numpy())
-            all_targets.append(target.numpy())
-        
-        predictions = np.stack(all_predictions)
-        targets = np.stack(all_targets)
-        
-        # 1. Overall Time Series Metrics
-        metrics['Overall'] = {
-            'MSE': np.mean((predictions - targets) ** 2),
-            'MAE': np.mean(np.abs(predictions - targets)),
-            'RMSE': np.sqrt(np.mean((predictions - targets) ** 2)),
-            'Pearson_Correlation': pearsonr(predictions.flatten(), targets.flatten())[0],
-            'R2_Score': 1 - np.sum((predictions - targets) ** 2) / np.sum((targets - np.mean(targets)) ** 2)
-        }
-        
-        genes = list(dataset.node_map.keys())
-        gene_correlations = []
-        
-        for i, gene in enumerate(genes):
-            gene_pred = predictions[:, i, :]
-            #print(f"gene_pred.shape: {gene_pred.shape}")
-            gene_target = targets[:, i, :]
-            #print(f"gene_target.shape: {gene_target.shape}")
-            corr = pearsonr(gene_pred.flatten(), gene_target.flatten())[0]
-            gene_correlations.append(corr)
-            
-            plt.figure(figsize=(10, 6))
-            plt.plot(gene_target[0], label='Actual', alpha=0.7)
-            plt.plot(gene_pred[0], label='Predicted', alpha=0.7)
-            plt.title(f'{gene} Prediction (corr={corr:.3f})')
-            plt.legend()
-            plt.savefig(os.path.join(save_dir, f'{gene}_prediction.png'))
-            plt.close()
-        
-        metrics['Gene_Performance'] = {
-            'Mean_Correlation': np.mean(gene_correlations),
-            'Median_Correlation': np.median(gene_correlations),
-            'Std_Correlation': np.std(gene_correlations),
-            'Best_Genes': [genes[i] for i in np.argsort(gene_correlations)[-5:]],
-            'Worst_Genes': [genes[i] for i in np.argsort(gene_correlations)[:5]]
-        }
-        
-        temporal_corrs = []
-        for t in range(predictions.shape[1]):
-            corr = pearsonr(predictions[:, t, :].flatten(), 
-                          targets[:, t, :].flatten())[0]
-            temporal_corrs.append(corr)
-        
-        metrics['Temporal_Stability'] = {
-            'Mean_Temporal_Correlation': np.mean(temporal_corrs),
-            'Std_Temporal_Correlation': np.std(temporal_corrs),
-            'Min_Temporal_Correlation': np.min(temporal_corrs),
-            'Max_Temporal_Correlation': np.max(temporal_corrs)
-        }
-        
-        with open(os.path.join(save_dir, 'full_evaluation.txt'), 'w') as f:
-            f.write("Model Evaluation Results\n\n")
-            for category, category_metrics in metrics.items():
-                f.write(f"\n{category}:\n")
-                for metric, value in category_metrics.items():
-                    if isinstance(value, (float, int)):
-                        f.write(f"{metric}: {value:.4f}\n")
-                    else:
-                        f.write(f"{metric}: {value}\n")
-        
-        return metrics
-    
-def evaluate_model_with_direct_values(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCN_temporal_graph'):
-    os.makedirs(save_dir, exist_ok=True)
-    model.eval()
-    
-    # Target times for predictions
-    target_times = [21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0]
-    
-    with torch.no_grad():
-        all_predictions = []
-        all_targets = []
-        
-        # Get predictions without averaging
-        for seq, label in zip(val_sequences, val_labels):
-            pred = model(seq)
-            target = label[0].x  # Direct access to features
-            all_predictions.append(pred.numpy())
-            all_targets.append(target.numpy())
-            
-            # Print shapes for debugging
-            print(f"\nPrediction shape: {pred.shape}")
-            print(f"Target shape: {target.shape}")
-        
-        # Stack predictions and targets
-        predictions = np.stack(all_predictions)
-        targets = np.stack(all_targets)
-        
-        # Plot for each gene
-        genes = list(dataset.node_map.keys())
-        for i, gene in enumerate(genes):
-            # Get gene's predictions and targets
-            # Use first feature column for plotting
-            gene_pred = predictions[:, i, 0]  # [num_sequences]
-            gene_target = targets[:, i, 0]    # [num_sequences]
-            
-            plt.figure(figsize=(12, 6))
-            
-            # Plot with actual time points
-            plt.plot(target_times, gene_target, 'bo-', label='Actual', markersize=8)
-            plt.plot(target_times, gene_pred, 'ro--', label='Predicted', markersize=8)
-            
-            plt.title(f'Gene: {gene}')
-            plt.xlabel('Time Points')
-            plt.ylabel('Expression Value')
-            plt.grid(True, alpha=0.3)
-            plt.legend()
-            
-            # Add value labels
-            for t, pred, actual in zip(target_times, gene_pred, gene_target):
-                plt.annotate(f'{actual:.2f}', (t, actual),
-                           textcoords="offset points", xytext=(0,10),
-                           ha='center', color='blue')
-                plt.annotate(f'{pred:.2f}', (t, pred),
-                           textcoords="offset points", xytext=(0,-15),
-                           ha='center', color='red')
-            
-            plt.tight_layout()
-            plt.savefig(os.path.join(save_dir, f'{gene}_prediction.png'), dpi=300)
-            plt.close()
-            
-            if i == 0:
-                print(f"\nValues for gene {gene}:")
-                print("Time points:", target_times)
-                print("Predicted:", gene_pred)
-                print("Actual:", gene_target)
-    
 class Args:
     def __init__(self):
         self.Kt = 3  # temporal kernel size
