@@ -146,6 +146,9 @@ class TemporalGraphDataset:
             # Stack features
             temporal_features[t] = torch.stack(features)
             
+            for t, features in temporal_features.items():
+                print(f"Time {t}: Feature shape {features.shape}")
+            
             # Verify dimensions for first time point
             if t == self.time_points[0]:
                 print(f"\nFeature verification for time {t}:")
@@ -238,6 +241,9 @@ class TemporalGraphDataset:
         return sequences, labels
     
 def process_batch(seq, label):
+    print(f"Length of seq: {len(seq)}")  # 5
+    print(f"Length of label: {len(label)}") # 1
+
     # Stack sequence [seq_len, num_nodes, features]
     x = torch.stack([g.x for g in seq])  # [5, 52, 32]
     
@@ -245,7 +251,7 @@ def process_batch(seq, label):
     x = x.permute(2, 0, 1).unsqueeze(0)  # [1, 32, 5, 52]  # Fixed typo
     
     # Process target - keeping temporal dimension the same
-    target = torch.stack([g.x for g in label])  # [seq_len, 52, 32]
+    target = torch.stack([g.x for g in label])  # Should be [seq_len, num_nodes, features] -> [5, 52, 32]
     target = target.permute(2, 0, 1).unsqueeze(0)  # [1, 32, seq_len, 52]
     
     return x, target
@@ -301,7 +307,7 @@ def train_stgcn(dataset, val_ratio=0.2):
 
     num_epochs = 100
     best_val_loss = float('inf')
-    patience = 10
+    patience = 100
     patience_counter = 0
     save_dir = 'plottings_STGCN'
     os.makedirs(save_dir, exist_ok=True)
@@ -321,10 +327,10 @@ def train_stgcn(dataset, val_ratio=0.2):
             #print(f"Shape of x inside training: {x.shape}") # --> [1, 32, 5, 52]
             #print(f"Shape of target inside training: {target.shape}") # --> [1, 32, 1, 52]
             output = model(x)
-            #print(f"Shape of output: {output.shape}")
+            print(f"Shape of output: {output.shape}") # --> [1, 32, 5, 52]
 
             #target = target[:,:,-1:, :]
-            #print(f"Shape of target[:,:,-1:, :]: {target[:,:,-1:, :].shape}")
+            print(f"Shape of target: {target.shape}") # --> [32, 1, 52]
             loss = criterion(output, target)
 
             loss.backward()
@@ -338,13 +344,17 @@ def train_stgcn(dataset, val_ratio=0.2):
         with torch.no_grad():
             for seq,label in zip(val_sequences, val_labels):
                 x, target = process_batch(seq,label)
+                
                 output = model(x)
-
+                print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
+                print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
                 val_loss = criterion(output, target)
 
                 output_corr = calculate_correlation(output)
+                print(f"Shape of output corr: {output_corr.shape}") # [32, 32]
                 target_corr = calculate_correlation(target)
+                print(f"Shape of target corr: {target_corr.shape}") # [32, 32]
                 int_loss = F.mse_loss(output_corr, target_corr)
                 epoch_interaction_loss += int_loss.item()
         
@@ -379,7 +389,7 @@ def train_stgcn(dataset, val_ratio=0.2):
                 break
 
     # Load best model
-    checkpoint = torch.load(f'{save_dir}/best_model.pth')
+    checkpoint = torch.load(f'{save_dir}/best_model.pth', weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
     
     # Plot training progress
