@@ -285,25 +285,47 @@ class TemporalInteractionNet(nn.Module):
         self.transform1 = TransformerConv(hidden_channels, hidden_channels)
         self.transform2 = TransformerConv(hidden_channels, hidden_channels)
         
-        # Separate branches for temporal and interaction patterns
-        self.temporal_conv = nn.Conv1d(hidden_channels, hidden_channels, kernel_size=3, padding=1)
-        self.interaction_conv = GCNConv(hidden_channels, hidden_channels)
+        # Modified temporal processing
+        self.temporal_proj = nn.Linear(in_channels*2, hidden_channels)
+        self.temporal_conv = nn.Conv1d(hidden_channels, hidden_channels, 
+                                     kernel_size=3, padding=1)
         
         # Skip connections
         self.skip_linear = nn.Linear(hidden_channels, hidden_channels)
         
         # Output layers
         self.node_predictor = nn.Linear(hidden_channels * 2, out_channels)
+        
+        # Interaction predictor
         self.interaction_predictor = nn.Sequential(
-            nn.Linear(hidden_channels * 2, hidden_channels),
+            nn.Linear(hidden_channels * 4, hidden_channels),
             nn.ReLU(),
-            nn.Linear(hidden_channels, 1)
+            nn.Linear(hidden_channels, hidden_channels // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_channels // 2, 1),
+            nn.Sigmoid()
         )
         
         # Regularization
         self.layer_norm1 = nn.LayerNorm(hidden_channels)
         self.layer_norm2 = nn.LayerNorm(hidden_channels)
         self.dropout = nn.Dropout(0.2)
+        
+    def predict_interactions(self, embeddings):
+        num_nodes = embeddings.size(0)
+        
+        # Create all pairs of node embeddings
+        node_i = embeddings.unsqueeze(1).repeat(1, num_nodes, 1)
+        node_j = embeddings.unsqueeze(0).repeat(num_nodes, 1, 1)
+        
+        # Concatenate pairs
+        pairs = torch.cat([node_i, node_j], dim=-1)
+        
+        # Predict interactions for all pairs at once
+        interactions = self.interaction_predictor(pairs.view(-1, pairs.size(-1)))
+        interactions = interactions.view(num_nodes, num_nodes)
+        
+        return interactions
         
     def forward(self, sequence):
         # Extract edge information
@@ -322,12 +344,26 @@ class TemporalInteractionNet(nn.Module):
         
         # Stack temporal features
         h_temporal = torch.stack(temporal_embeddings, dim=1)  # [num_nodes, seq_len, hidden_channels]
+        #print(f"Shape of h_temporal after stack: {h_temporal.shape}")
         
-        # Temporal branch
-        h_t = h_temporal.transpose(1, 2)  # [num_nodes, hidden_channels, seq_len]
+        # Temporal processing
+        # Project to proper dimension first
+        h_t = h_temporal.view(-1, h_temporal.size(-1))  # [num_nodes * seq_len, hidden_channels]
+        #print(f"Shape of h_t after view: {h_t.shape}")
+        h_t = self.temporal_proj(h_t)
+        #print(f"Shape of h_t after project: {h_t.shape}")
+        h_t = h_t.view(num_nodes, seq_len, -1)  # [num_nodes, seq_len, hidden_channels]
+        #print(f"Shape of h_t after view: {h_t.shape}")
+        
+        # Apply temporal convolution
+        h_t = h_t.transpose(1, 2)  # [num_nodes, hidden_channels, seq_len]
+        #print(f"Shape of h_t after transpose: {h_t.shape}")
         h_t = self.temporal_conv(h_t)
+        #print(f"Shape of h_t after temporal conv: {h_t.shape}")
         h_t = h_t.transpose(1, 2)  # [num_nodes, seq_len, hidden_channels]
+        #print(f"Shape of h_t after transpose: {h_t.shape}")
         h_t = torch.mean(h_t, dim=1)  # [num_nodes, hidden_channels]
+        #print(f"Shape of h_t after mean dim=1: {h_t.shape}")
         
         # Interaction branch with transformer
         h_i = torch.mean(h_temporal, dim=1)  # [num_nodes, hidden_channels]
@@ -351,18 +387,12 @@ class TemporalInteractionNet(nn.Module):
         # Node predictions
         node_predictions = self.node_predictor(h_combined)
         
-        # Interaction predictions
-        interaction_scores = []
-        for i in range(num_nodes):
-            for j in range(num_nodes):
-                node_pair = torch.cat([h_combined[i], h_combined[j]])
-                score = self.interaction_predictor(node_pair)
-                interaction_scores.append(score)
-        
-        interaction_matrix = torch.reshape(torch.stack(interaction_scores), (num_nodes, num_nodes))
+        # Interaction predictions using the combined features
+        interaction_matrix = self.predict_interactions(h_combined)
         
         return node_predictions, interaction_matrix
-    
+
+
 class BaseSTGCNLayer(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(BaseSTGCNLayer, self).__init__()
