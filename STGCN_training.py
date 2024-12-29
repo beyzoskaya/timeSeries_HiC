@@ -25,7 +25,7 @@ def clean_gene_name(gene_name):
     return gene_name.split('(')[0].strip()
 
 class TemporalGraphDataset:
-    def __init__(self, csv_file, embedding_dim=64, seq_len=5, pred_len=1): # I change the seq_len to more lower value
+    def __init__(self, csv_file, embedding_dim=32, seq_len=5, pred_len=1): # I change the seq_len to more lower value
         self.seq_len = seq_len
         self.pred_len = pred_len
         self.embedding_dim = embedding_dim
@@ -117,10 +117,10 @@ class TemporalGraphDataset:
                 G,
                 dimensions=self.embedding_dim,  # Use full embedding dimension
                 walk_length=10,
-                num_walks=80,
+                num_walks=100,
                 workers=1,
-                p=1,
-                q=1,
+                p=1.5,
+                q=1.5,
                 weight_key='weight'
             )
             
@@ -448,11 +448,9 @@ def analyze_interactions(model, val_sequences, val_labels, dataset):
             all_predicted.append(predicted_corr.cpu().numpy())
             all_true.append(true_corr.cpu().numpy())
     
-    # Average the interaction losses
     predicted_interactions = np.concatenate(all_predicted, axis=0)
     true_interactions = np.concatenate(all_true, axis=0)
     
-    # Calculate interaction loss (mean squared error)
     interaction_loss = np.mean((predicted_interactions - true_interactions) ** 2)
     
     print(f"Interaction Preservation (MSE between predicted and true interaction matrix): {interaction_loss:.4f}")
@@ -470,18 +468,30 @@ def analyze_gene(model, val_sequences, val_labels, dataset):
             x, target = process_batch(seq, label)  # Shape: [1, 32, seq_len, 52]
             output = model(x)  # Shape: [1, 32, seq_len, 52]
             
-            # Flatten and store predicted and true values
-            all_predicted.append(output.squeeze(0).cpu().numpy())  # Remove batch dim
-            all_true.append(target.squeeze(0).cpu().numpy())
+            # remove the batch dimension, keeping seq_len and gene dimensions
+            all_predicted.append(output.squeeze(0).cpu().numpy())  # Shape: [seq_len, genes]
+            all_true.append(target.squeeze(0).cpu().numpy())  # Shape: [seq_len, genes]
     
-    # Flatten the list to a 2D array (time * nodes) for evaluation
-    all_predicted = np.concatenate(all_predicted, axis=1)  # [channels, time_steps * nodes]
-    all_true = np.concatenate(all_true, axis=1)
+    all_predicted = np.concatenate(all_predicted, axis=0)  # Shape: [total_time_steps, genes]
+    all_true = np.concatenate(all_true, axis=0)  # Shape: [total_time_steps, genes]
+
+    if all_predicted.shape[1] != all_true.shape[1]:
+        # Align shapes by duplicating the true labels across all predicted genes
+        if all_true.shape[1] == 1 and all_predicted.shape[1] > 1:
+            all_true = np.repeat(all_true, all_predicted.shape[1], axis=1) 
+        else:
+            raise ValueError(f"Predicted and true arrays have different gene dimensions: "
+                             f"{all_predicted.shape[1]} vs {all_true.shape[1]}")
     
-    # Pearson correlation coefficient between predicted and true gene expressions
     gene_corrs = []
-    for gene_idx in range(all_true.shape[0]):  # Iterate over genes
-        corr, _ = pearsonr(all_predicted[gene_idx], all_true[gene_idx])
+    num_genes = all_true.shape[1]  
+    
+    for gene_idx in range(num_genes):  # Iterate over genes
+        # Flatten the arrays to 1D
+        pred_gene = all_predicted[:, gene_idx].flatten()  # Flatten to 1D
+        true_gene = all_true[:, gene_idx].flatten()  # Flatten to 1D
+        
+        corr, _ = pearsonr(pred_gene, true_gene)
         gene_corrs.append(corr)
     
     mean_corr = np.mean(gene_corrs)
@@ -490,8 +500,129 @@ def analyze_gene(model, val_sequences, val_labels, dataset):
     
     return mean_corr
 
+def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCN'):
+    os.makedirs(save_dir, exist_ok=True)
+    model.eval()
+    metrics = {}
+    
+    time_points = dataset.time_points
+    seq_length = dataset.seq_len
+    prediction_times = time_points[seq_length:] 
+    
+    print("\nValidation Time Information:")
+    print(f"Original time points: {time_points}")
+    print(f"Sequence length: {seq_length}")
+    print(f"Prediction times: {prediction_times}")
 
+    with torch.no_grad():
+        all_predictions = []
+        all_targets = []
+        
+        for seq, label in zip(val_sequences, val_labels):
+            x, target = process_batch(seq, label) 
+            
+            output = model(x)  # output [1, seq_len, num_genes, num_features]
+            target = target.squeeze(0).cpu().numpy()  # Remove batch dimension
+            
+            all_predictions.append(output.squeeze(0).cpu().numpy())  # Remove batch dimension
+            all_targets.append(target)
+        
+        predictions = np.stack(all_predictions)  # Shape: [num_sequences, seq_len, num_genes, num_features]
+        targets = np.stack(all_targets)  # Shape: [num_sequences, seq_len, num_genes, num_features]
+        
+        print(f"Predictions shape: {predictions.shape}")
+        print(f"Targets shape: {targets.shape}")
 
+        # 1. Expand the targets array to match the shape of predictions (same number of features)
+        targets_expanded = np.expand_dims(targets, axis=2).squeeze(3)  # Expand to shape: [num_sequences, seq_len, 1, num_features]
+        targets_expanded = np.repeat(targets_expanded, predictions.shape[2], axis=2)  # Repeat to match the number of genes
+        
+        print(f"Expanded Targets shape: {targets_expanded.shape}")
+        print(f"Fixed Predictions shape: {predictions.shape}")
+
+        # 1. Overall Time Series Metrics
+        try:
+            print(f"Flattened predictions shape: {predictions.flatten().shape}")
+            print(f"Flattened targets shape: {targets_expanded.flatten().shape}")
+            
+            metrics['Overall'] = {
+                'MSE': np.mean((predictions - targets_expanded) ** 2),
+                'MAE': np.mean(np.abs(predictions - targets_expanded)),
+                'RMSE': np.sqrt(np.mean((predictions - targets_expanded) ** 2)),
+                'Pearson_Correlation': pearsonr(predictions.flatten(), targets_expanded.flatten())[0],
+                'R2_Score': 1 - np.sum((predictions - targets_expanded) ** 2) / np.sum((targets_expanded - np.mean(targets_expanded)) ** 2)
+            }
+        except ValueError as e:
+            print(f"Error calculating Pearson correlation: {e}")
+            print("Predictions and Targets mismatch!")
+            print(f"Predictions: {predictions}")
+            print(f"Targets: {targets_expanded}")
+            raise e
+        
+        genes = list(dataset.node_map.keys())
+        print(f"Number of genes: {genes}")
+        gene_correlations = []
+        
+        # Iterate over the genes
+        for i in range(predictions.shape[3]):  # Loop over 52 genes (the last dimension)
+            # Debugging: check the current index and the size of `i`
+            print(f"Processing gene index {i}")
+            
+            if i >= predictions.shape[3]:  # Check if the index exceeds the number of genes
+                print(f"Warning: Gene index {i} exceeds the number of genes in predictions!")
+                continue  # Skip this gene if index is out of bounds
+            
+            # Correct indexing along the gene dimension (52)
+            gene_pred = predictions[:, :, :, i]  # Shape: [num_sequences, seq_len, num_features]
+            gene_target = targets_expanded[:, :, :, i]  # Shape: [num_sequences, seq_len, num_features]
+            
+            # Pearson correlation for each gene
+            corr = pearsonr(gene_pred.flatten(), gene_target.flatten())[0]
+            gene_correlations.append(corr)
+            
+            # Plot and save each gene's prediction vs actual values
+            plt.figure(figsize=(10, 6))
+            plt.plot(gene_target[0], label='Actual', alpha=0.7)
+            plt.plot(gene_pred[0], label='Predicted', alpha=0.7)
+            plt.title(f'Gene {i} Prediction (corr={corr:.3f})')
+            plt.legend()
+            plt.savefig(os.path.join(save_dir, f'gene_{i}_prediction.png'))
+            plt.close()
+
+        metrics['Gene_Performance'] = {
+            'Mean_Correlation': np.mean(gene_correlations),
+            'Median_Correlation': np.median(gene_correlations),
+            'Std_Correlation': np.std(gene_correlations),
+            'Best_Genes': [genes[i] for i in np.argsort(gene_correlations)[-5:]],
+            'Worst_Genes': [genes[i] for i in np.argsort(gene_correlations)[:5]]
+        }
+        
+        # 2. Temporal Stability Metrics
+        temporal_corrs = []
+        for t in range(predictions.shape[1]):  # Loop through time steps
+            corr = pearsonr(predictions[:, t, :, :].flatten(), targets_expanded[:, t, :, :].flatten())[0]
+            temporal_corrs.append(corr)
+        
+        metrics['Temporal_Stability'] = {
+            'Mean_Temporal_Correlation': np.mean(temporal_corrs),
+            'Std_Temporal_Correlation': np.std(temporal_corrs),
+            'Min_Temporal_Correlation': np.min(temporal_corrs),
+            'Max_Temporal_Correlation': np.max(temporal_corrs)
+        }
+        
+        # 3. Save evaluation results to file
+        with open(os.path.join(save_dir, 'full_evaluation.txt'), 'w') as f:
+            f.write("Model Evaluation Results\n\n")
+            for category, category_metrics in metrics.items():
+                f.write(f"\n{category}:\n")
+                for metric, value in category_metrics.items():
+                    if isinstance(value, (float, int)):
+                        f.write(f"{metric}: {value:.4f}\n")
+                    else:
+                        f.write(f"{metric}: {value}\n")
+        
+        return metrics
+    
 class Args:
     def __init__(self):
         self.Kt = 3  # temporal kernel size
@@ -532,3 +663,17 @@ if __name__ == "__main__":
 
     interaction_corr = analyze_interactions(model, val_sequences, val_labels, dataset)
     mean_corr = analyze_gene(model, val_sequences, val_labels, dataset)
+
+    metrics = evaluate_model_performance(
+    model, val_sequences, val_labels, dataset, save_dir='evaluation_results'
+
+)
+    print("\nModel Performance Summary:")
+    print(f"Overall Pearson Correlation: {metrics['Overall']['Pearson_Correlation']:.4f}")
+    print(f"RMSE: {metrics['Overall']['RMSE']:.4f}")
+    print(f"R² Score: {metrics['Overall']['R2_Score']:.4f}")
+    print(f"\nGene-wise Performance:")
+    print(f"Mean Gene Correlation: {metrics['Gene_Performance']['Mean_Correlation']:.4f}")
+    print(f"Best Performing Genes: {', '.join(metrics['Gene_Performance']['Best_Genes'])}")
+    print(f"\nTemporal Stability:")
+    print(f"Mean Temporal Correlation: {metrics['Temporal_Stability']['Mean_Temporal_Correlation']:.4f}")
