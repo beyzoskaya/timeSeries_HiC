@@ -18,6 +18,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 sys.path.append('./STGCN')
 from STGCN.model.models import STGCNChebGraphConv
 import argparse
+from normalize_genes import normalize_hic_weights
+from scipy.spatial.distance import cdist
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -83,15 +85,25 @@ class TemporalGraphDataset:
     def create_temporal_node_features_several_graphs_created(self):
         """Create temporal node features with correct dimensionality"""
         temporal_features = {}
-        
+        nodes = list(self.node_map.keys())
+
+        print("\n=== Initial Data Statistics ===")
         for t in self.time_points:
             print(f"\nProcessing time point {t}")
+            gene1_expr = self.df[f'Gene1_Time_{t}'].values
+            gene2_expr = self.df[f'Gene2_Time_{t}'].values
+            all_expr = np.concatenate([gene1_expr, gene2_expr])
+            print(f"\nTime point {t}:")
+            print(f"Expression range: [{np.min(all_expr):.4f}, {np.max(all_expr):.4f}]")
+            print(f"Mean: {np.mean(all_expr):.4f}")
+            print(f"Std: {np.std(all_expr):.4f}")
             
             # Create graph for this time point
             G = nx.Graph()
             G.add_nodes_from(self.node_map.keys())
             
             # Add edges with weights
+            edge_weights = []
             for _, row in self.df.iterrows():
                 gene1_expr = row[f'Gene1_Time_{t}']
                 gene2_expr = row[f'Gene2_Time_{t}']
@@ -110,8 +122,15 @@ class TemporalGraphDataset:
                 tad_sim * 0.1 +                # 10% TAD
                 ins_sim * 0.05 +               # 5% Insulation
                 expr_sim * 0.5)
-                        
-                G.add_edge(row['Gene1_clean'], row['Gene2_clean'], weight=weight)
+                edge_weights.append((row['Gene1_clean'], row['Gene2_clean'], weight))
+
+            print("Applying KR normalization...")
+            normalized_edges = normalize_hic_weights(edge_weights, nodes)        
+            #G.add_edge(row['Gene1_clean'], row['Gene2_clean'], weight=weight)
+            G = nx.Graph()
+            G.add_nodes_from(nodes)
+            for gene1, gene2, weight in normalized_edges:
+                G.add_edge(gene1, gene2, weight=weight)
             
             # Create Node2Vec embeddings with exact embedding_dim dimensions
             node2vec = Node2Vec(
@@ -132,6 +151,10 @@ class TemporalGraphDataset:
             for gene in self.node_map.keys():
                 # Get Node2Vec embedding
                 node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
+                # still I am seeing negative values for node embeddings
+                min_val = node_embedding.min()
+                max_val = node_embedding.max()
+                node_embedding = (node_embedding - min_val) / (max_val - min_val)
                 
                 # Get expression value for this time point
                 gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
@@ -149,8 +172,19 @@ class TemporalGraphDataset:
 
             #for t, features in temporal_features.items():
             #    print(f"Time {t}: Feature shape {features.shape}")
-            
-            print(f"Sample Node2Vec embedding for a node: {temporal_features[self.time_points[0]][0, :5]}")
+
+            # After creating Node2Vec embeddings
+            print("\n=== Node2Vec Embedding Statistics ===")
+            print(f"Embedding shape: {temporal_features[t].shape}")
+            print(f"Range: [{temporal_features[t].min():.4f}, {temporal_features[t].max():.4f}]")
+            print(f"Mean: {temporal_features[t].mean():.4f}")
+            print(f"Std: {temporal_features[t].std():.4f}")
+            print("Sample embeddings for first 3 nodes:")
+            for i in range(min(3, len(self.node_map))):
+                gene = list(self.node_map.keys())[i]
+                print(f"{gene}: {temporal_features[t][i, :5]}")
+
+            #print(f"Sample Node2Vec embedding for a node: {temporal_features[self.time_points[0]][0, :5]}")
 
             # Verify dimensions for first time point
             if t == self.time_points[0]:
@@ -196,9 +230,13 @@ class TemporalGraphDataset:
         """Create temporal sequences for training"""
         sequences = []
         labels = []
+        print("\n=== Sequence Creation Statistics ===")
+        print(f"Time points: {self.time_points}")
+        print(f"Sequence length: {self.seq_len}")
+        print(f"Prediction length: {self.pred_len}")
 
-        print("\nTime points being used:")
-        print(f"All time points: {self.time_points}")
+        #print("\nTime points being used:")
+        #print(f"All time points: {self.time_points}")
         
         for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
             seq_graphs = [self.get_pyg_graph(t) for t in self.time_points[i:i+self.seq_len]]
@@ -296,7 +334,8 @@ def train_stgcn(dataset, val_ratio=0.2):
     adj[edge_index[0], edge_index[1]] = 1 if edge_weight is None else edge_weight # diagonal vs nondiagonal elements for adj matrix
     D = torch.diag(torch.sum(adj, dim=1) ** (-0.5))
     args.gso = torch.eye(args.n_vertex) - D @ adj @ D
-
+    
+    """
     # Split data into train and validation
     n_samples = len(sequences)
     n_train = int(n_samples * (1 - val_ratio))
@@ -308,15 +347,30 @@ def train_stgcn(dataset, val_ratio=0.2):
     print(f"\nData Split:")
     print(f"Training sequences: {len(train_sequences)}")
     print(f"Validation sequences: {len(val_sequences)}")
+    """
+    # Random split
+    n_samples = len(sequences)
+    n_train = int(n_samples * (1 - val_ratio))
+    indices = torch.randperm(n_samples)
+    train_idx = indices[:n_train]
+    val_idx = indices[n_train:]
+    train_sequences = [sequences[i] for i in train_idx]
+    train_labels = [labels[i] for i in train_idx]
+    val_sequences = [sequences[i] for i in val_idx]
+    val_labels = [labels[i] for i in val_idx]
 
+    print("\n=== Training Data Statistics ===")
+    print(f"Number of training sequences: {len(train_sequences)}")
+    print(f"Number of validation sequences: {len(val_sequences)}")
+    
     # Initialize STGCN
     model = STGCNChebGraphConv(args, args.blocks, args.n_vertex)
     model = model.float() # convert model to float otherwise I am getting type error
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)
     criterion = nn.MSELoss()
 
-    num_epochs = 60
+    num_epochs = 100
     best_val_loss = float('inf')
     patience = 10
     patience_counter = 0
@@ -330,42 +384,56 @@ def train_stgcn(dataset, val_ratio=0.2):
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
+        batch_stats = []
 
         for seq,label in zip(train_sequences, train_labels):
             optimizer.zero_grad()
-            
-            x, _ = process_batch(seq, label)
+            x,target = process_batch(seq, label)
+            #x, _ = process_batch(seq, label)
             #print(f"Shape of x inside training: {x.shape}") # --> [1, 32, 5, 52]
             #print(f"Shape of target inside training: {target.shape}") # --> [1, 32, 1, 52]
             output = model(x)
             #print(f"Shape of output: {output.shape}") # --> [1, 32, 5, 52]
-            _, target = process_batch(seq, label)
+            #_, target = process_batch(seq, label)
             #target = target[:,:,-1:, :]
             #print(f"Shape of target: {target.shape}") # --> [32, 1, 52]
             target = target[:, :, -1:, :]  # Keep only the last timestep
             output = output[:, :, -1:, :]
+            batch_stats.append({
+                'target_range': [target.min().item(), target.max().item()],
+                'output_range': [output.min().item(), output.max().item()],
+                'target_mean': target.mean().item(),
+                'output_mean': output.mean().item()
+            })
             loss = criterion(output, target)
 
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
 
+        if epoch % 10 == 0:
+            print(f"\nEpoch {epoch} Statistics:")
+            df = pd.DataFrame(batch_stats)
+            print(df.describe())
+
         model.eval()
         val_loss = 0
+        val_loss_total = 0
         epoch_interaction_loss = 0
-
         with torch.no_grad():
             for seq,label in zip(val_sequences, val_labels):
-                x, _ = process_batch(seq, label)
+                #x, _ = process_batch(seq, label)
+                x,target = process_batch(seq, label)
                 
                 output = model(x)
-                _, target = process_batch(seq, label)
+                #_, target = process_batch(seq, label)
                 target = target[:, :, -1:, :]  
                 output = output[:, :, -1:, :]
                 #print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
                 #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
                 val_loss = criterion(output, target)
+                val_loss_total += val_loss.item()
 
                 output_corr = calculate_correlation(output)
                 #print(f"Shape of output corr: {output_corr.shape}") # [32, 32]
@@ -376,7 +444,7 @@ def train_stgcn(dataset, val_ratio=0.2):
         
         # Calculate average losses
         avg_train_loss = total_loss / len(train_sequences)
-        avg_val_loss = val_loss / len(val_sequences)
+        avg_val_loss = val_loss_total / len(val_sequences)
         avg_interaction_loss = epoch_interaction_loss / len(val_sequences)
         
         train_losses.append(avg_train_loss)
@@ -427,6 +495,7 @@ def train_stgcn(dataset, val_ratio=0.2):
     plt.legend()
     
     plt.tight_layout()
+    plt.show()
     plt.savefig(f'{save_dir}/training_progress.png')
     plt.close()
     
@@ -503,7 +572,7 @@ def analyze_gene(model, val_sequences, val_labels, dataset):
     
     return mean_corr
 
-def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCN'):
+def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
     metrics = {
@@ -544,7 +613,7 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_d
     
     # Calculate temporal stability metrics
     metrics['Temporal_Stability'] = calculate_temporal_metrics(
-        predictions, targets, dataset.time_points[-len(predictions):], save_dir
+        predictions, targets
     )
     
     # Create visualizations
@@ -621,38 +690,78 @@ def calculate_gene_metrics(predictions, targets, node_map, save_dir):
     plt.xlabel('Correlation')
     plt.ylabel('RMSE')
     plt.title('Gene Performance Distribution')
+    plt.show()
     plt.savefig(f'{save_dir}/gene_performance_distribution.png')
     plt.close()
     
     return metrics
 
-def calculate_temporal_metrics(predictions, targets, time_points, save_dir):
-    """Calculate temporal stability metrics."""
-    metrics = {}
-    save_dir='plottings_STGCN'
+def calculate_temporal_metrics(true_values, predicted_values):
 
-    # Calculate temporal correlations
-    temporal_correlations = []
-    for t in range(len(predictions)):
-        pred = predictions[t].flatten()
-        true = targets[t].flatten()
-        mask = ~(np.isnan(pred) | np.isnan(true))
-        if mask.any():
-            corr, _ = pearsonr(pred[mask], true[mask])
-            temporal_correlations.append(corr)
+    metrics = {}
     
-    metrics['Mean_Temporal_Correlation'] = np.nanmean(temporal_correlations)
-    metrics['Temporal_Correlation_Std'] = np.nanstd(temporal_correlations)
+    # 1. Dynamic Time Warping (DTW) distance
+    dtw_distances = []
+    for i in range(true_values.shape[1]):
+        true_seq = true_values[:, i].reshape(-1, 1)
+        pred_seq = predicted_values[:, i].reshape(-1, 1)
+        D = cdist(true_seq, pred_seq)
+        dtw_distances.append(D.sum())
+    metrics['dtw_mean'] = np.mean(dtw_distances)
     
-    # Plot temporal stability
-    plt.figure(figsize=(10, 6))
-    plt.plot(temporal_correlations, marker='o')
-    plt.xlabel('Time Step')
-    plt.ylabel('Correlation')
-    plt.title('Temporal Stability of Predictions')
-    plt.grid(True)
-    plt.savefig(f'{save_dir}/temporal_stability.png')
-    plt.close()
+    # 2. Temporal Correlation (considers lag relationships)
+    def temporal_corr(y_true, y_pred, max_lag=3):
+        correlations = []
+        for lag in range(max_lag + 1):
+            if lag == 0:
+                corr = np.corrcoef(y_true, y_pred)[0, 1]
+                #print(f"I'm inside lag=0")
+            else:
+                corr = np.corrcoef(y_true[lag:], y_pred[:-lag])[0, 1]
+            correlations.append(corr)
+        return np.max(correlations)  # Return max correlation across lags
+    
+    temp_corrs = []
+    for i in range(true_values.shape[1]):
+        temp_corr = temporal_corr(true_values[:, i], predicted_values[:, i])
+        temp_corrs.append(temp_corr)
+    metrics['temporal_correlation'] = np.mean(temp_corrs)
+    
+    # 3. Trend Consistency (direction of changes)
+    def trend_accuracy(y_true, y_pred):
+        true_diff = np.diff(y_true)
+        pred_diff = np.diff(y_pred)
+        true_direction = np.sign(true_diff)
+        pred_direction = np.sign(pred_diff)
+        return np.mean(true_direction == pred_direction)
+    
+    trend_accs = []
+    for i in range(true_values.shape[1]):
+        trend_acc = trend_accuracy(true_values[:, i], predicted_values[:, i])
+        trend_accs.append(trend_acc)
+    metrics['trend_accuracy'] = np.mean(trend_accs)
+    
+    # 4. RMSE over time
+    time_rmse = []
+    for t in range(true_values.shape[0]):
+        rmse = np.sqrt(np.mean((true_values[t] - predicted_values[t])**2))
+        time_rmse.append(rmse)
+    metrics['rmse_over_time'] = np.mean(time_rmse)
+    metrics['rmse_std'] = np.std(time_rmse)
+    
+    # 5. Temporal Pattern Similarity
+    def pattern_similarity(y_true, y_pred):
+        # Normalize sequences
+        y_true_norm = y_true
+        y_pred_norm = y_pred
+        # Calculate similarity
+        return np.mean(np.abs(y_true_norm - y_pred_norm))
+    
+    pattern_sims = []
+    for i in range(true_values.shape[1]):
+        sim = pattern_similarity(true_values[:, i], predicted_values[:, i])
+        pattern_sims.append(sim)
+    metrics['pattern_similarity'] = np.mean(pattern_sims)
     
     return metrics
 
@@ -671,6 +780,7 @@ def create_evaluation_plots(predictions, targets, dataset, save_dir):
     plt.xlabel('True Values')
     plt.ylabel('Predicted Values')
     plt.title('Overall Prediction Performance')
+    plt.show()
     plt.savefig(f'{save_dir}/overall_scatter.png')
     plt.close()
     
@@ -689,6 +799,7 @@ def create_evaluation_plots(predictions, targets, dataset, save_dir):
         plt.legend()
     
     plt.tight_layout()
+    plt.show()
     plt.savefig(f'{save_dir}/temporal_predictions.png')
     plt.close()
     
@@ -705,6 +816,7 @@ def create_evaluation_plots(predictions, targets, dataset, save_dir):
     ax2.set_title('Predicted Gene Correlations')
     
     plt.tight_layout()
+    plt.show()
     plt.savefig(f'{save_dir}/correlation_heatmaps.png')
     plt.close()
 
@@ -814,15 +926,20 @@ if __name__ == "__main__":
     val_sequences, 
     val_labels, 
     dataset,
-    save_dir='evaluation_results'
+    save_dir='plottings_STGCN'
     )
 
     print("\nModel Performance Summary:")
-    print(f"Overall Pearson Correlation: {metrics['Overall']['Pearson_Correlation']:.4f}")
+    print(f"Overall Metrics:")
+    print(f"Pearson Correlation: {metrics['Overall']['Pearson_Correlation']:.4f}")
     print(f"RMSE: {metrics['Overall']['RMSE']:.4f}")
     print(f"R² Score: {metrics['Overall']['R2_Score']:.4f}")
+    
     print(f"\nGene-wise Performance:")
     print(f"Mean Gene Correlation: {metrics['Gene_Performance']['Mean_Correlation']:.4f}")
     print(f"Best Performing Genes: {', '.join(metrics['Gene_Performance']['Best_Genes'])}")
-    print(f"\nTemporal Stability:")
-    print(f"Mean Temporal Correlation: {metrics['Temporal_Stability']['Mean_Temporal_Correlation']:.4f}")
+    
+    print(f"\nTemporal Performance:")
+    print(f"DTW Distance: {metrics['Temporal_Stability']['dtw_mean']:.4f}")
+    print(f"Temporal Correlation: {metrics['Temporal_Stability']['temporal_correlation']:.4f}")
+    print(f"Pattern Similarity: {metrics['Temporal_Stability']['pattern_similarity']:.4f}")
