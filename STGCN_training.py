@@ -14,6 +14,7 @@ from node2vec import Node2Vec
 from scipy.stats import pearsonr
 from STGCN.model.models import *
 import sys
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 sys.path.append('./STGCN')
 from STGCN.model.models import STGCNChebGraphConv
 import argparse
@@ -254,18 +255,15 @@ class TemporalGraphDataset:
         return sequences, labels
     
 def process_batch(seq, label):
-    #print(f"Length of seq: {len(seq)}")  # 5
-    #print(f"Length of label: {len(label)}") # 1
-
-    # Stack sequence [seq_len, num_nodes, features]
-    x = torch.stack([g.x for g in seq])  # [5, 52, 32]
+    """Process batch data for training."""
+    x = torch.stack([g.x for g in seq])
+    x = x.permute(2, 0, 1).unsqueeze(0)  # [1, channels, time_steps, nodes]
     
-    # Reshape for STGCN [batch, channels, time_steps, nodes]
-    x = x.permute(2, 0, 1).unsqueeze(0)  # [1, 32, 5, 52]  # Fixed typo
+    target = torch.stack([g.x for g in label])
+    target = target.permute(2, 0, 1).unsqueeze(0)  # [1, channels, time_steps, nodes]
     
-    # Process target - keeping temporal dimension the same
-    target = torch.stack([g.x for g in label])  # Should be [seq_len, num_nodes, features] -> [5, 52, 32]
-    target = target.permute(2, 0, 1).unsqueeze(0)  # [1, 32, seq_len, 52]
+    # Take only the last time step of target
+    target = target[:, :, -1:, :]  # [1, channels, 1, nodes]
     
     return x, target
 
@@ -315,10 +313,10 @@ def train_stgcn(dataset, val_ratio=0.2):
     model = STGCNChebGraphConv(args, args.blocks, args.n_vertex)
     model = model.float() # convert model to float otherwise I am getting type error
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0005)
+    optimizer = optim.Adam(model.parameters(), lr=0.0001)
     criterion = nn.MSELoss()
 
-    num_epochs = 50
+    num_epochs = 60
     best_val_loss = float('inf')
     patience = 10
     patience_counter = 0
@@ -336,14 +334,16 @@ def train_stgcn(dataset, val_ratio=0.2):
         for seq,label in zip(train_sequences, train_labels):
             optimizer.zero_grad()
             
-            x, target = process_batch(seq,label)
+            x, _ = process_batch(seq, label)
             #print(f"Shape of x inside training: {x.shape}") # --> [1, 32, 5, 52]
             #print(f"Shape of target inside training: {target.shape}") # --> [1, 32, 1, 52]
             output = model(x)
             #print(f"Shape of output: {output.shape}") # --> [1, 32, 5, 52]
-
+            _, target = process_batch(seq, label)
             #target = target[:,:,-1:, :]
             #print(f"Shape of target: {target.shape}") # --> [32, 1, 52]
+            target = target[:, :, -1:, :]  # Keep only the last timestep
+            output = output[:, :, -1:, :]
             loss = criterion(output, target)
 
             loss.backward()
@@ -356,9 +356,12 @@ def train_stgcn(dataset, val_ratio=0.2):
 
         with torch.no_grad():
             for seq,label in zip(val_sequences, val_labels):
-                x, target = process_batch(seq,label)
+                x, _ = process_batch(seq, label)
                 
                 output = model(x)
+                _, target = process_batch(seq, label)
+                target = target[:, :, -1:, :]  
+                output = output[:, :, -1:, :]
                 #print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
                 #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
@@ -503,125 +506,269 @@ def analyze_gene(model, val_sequences, val_labels, dataset):
 def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCN'):
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
+    metrics = {
+        'Overall': {},
+        'Gene_Performance': {},
+        'Temporal_Stability': {}
+    }
+    
+    all_predictions = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for seq, label in zip(val_sequences, val_labels):
+            x, target = process_batch_evaluation(seq, label)
+            output = model(x)
+            
+            # Take only the last time step of predictions to match target
+            output = output[:, :, -1:, :]  # Shape: [1, channels, 1, nodes]
+            
+            # Reshape for evaluation
+            pred = output.squeeze().cpu().numpy()  # Shape: [channels, nodes]
+            true = target.squeeze().cpu().numpy()  # Shape: [channels, nodes]
+            
+            all_predictions.append(pred)
+            all_targets.append(true)
+    
+    # Stack all predictions and targets
+    predictions = np.stack(all_predictions, axis=0)  # [samples, channels, nodes]
+    targets = np.stack(all_targets, axis=0)  # [samples, channels, nodes]
+    
+    # Calculate overall metrics
+    metrics['Overall'] = calculate_overall_metrics(predictions, targets)
+    
+    # Calculate gene-wise metrics
+    metrics['Gene_Performance'] = calculate_gene_metrics(
+        predictions, targets, dataset.node_map, save_dir
+    )
+    
+    # Calculate temporal stability metrics
+    metrics['Temporal_Stability'] = calculate_temporal_metrics(
+        predictions, targets, dataset.time_points[-len(predictions):], save_dir
+    )
+    
+    # Create visualizations
+    create_evaluation_plots(predictions, targets, dataset, save_dir)
+    gene_summary = create_detailed_gene_plots(predictions, targets, dataset, 
+                                            save_dir=f'{save_dir}/gene_plots')
+    
+    return metrics
+
+def calculate_overall_metrics(predictions, targets):
+    """Calculate overall model performance metrics."""
     metrics = {}
     
-    time_points = dataset.time_points
-    seq_length = dataset.seq_len
-    prediction_times = time_points[seq_length:] 
+    # Reshape arrays for overall metrics
+    pred_flat = predictions.reshape(-1)
+    target_flat = targets.reshape(-1)
     
-    print("\nValidation Time Information:")
-    print(f"Original time points: {time_points}")
-    print(f"Sequence length: {seq_length}")
-    print(f"Prediction times: {prediction_times}")
+    # Basic regression metrics
+    metrics['MSE'] = mean_squared_error(target_flat, pred_flat)
+    metrics['RMSE'] = np.sqrt(metrics['MSE'])
+    metrics['MAE'] = mean_absolute_error(target_flat, pred_flat)
+    metrics['R2_Score'] = r2_score(target_flat, pred_flat)
+    
+    # Overall correlation
+    metrics['Pearson_Correlation'], _ = pearsonr(target_flat, pred_flat)
+    
+    return metrics
 
-    with torch.no_grad():
-        all_predictions = []
-        all_targets = []
+def calculate_gene_metrics(predictions, targets, node_map, save_dir):
+    """Calculate gene-wise performance metrics."""
+    metrics = {}
+    gene_correlations = []
+    gene_rmse = []
+    save_dir='plottings_STGCN'
+    
+    num_genes = predictions.shape[-1]
+    genes = list(node_map.keys())
+    
+    for gene_idx in range(num_genes):
+        pred_gene = predictions[..., gene_idx].flatten()
+        true_gene = targets[..., gene_idx].flatten()
         
-        for seq, label in zip(val_sequences, val_labels):
-            x, target = process_batch(seq, label) 
-            
-            output = model(x)  # output [1, seq_len, num_genes, num_features]
-            target = target.squeeze(0).cpu().numpy()  # Remove batch dimension
-            
-            all_predictions.append(output.squeeze(0).cpu().numpy())  # Remove batch dimension
-            all_targets.append(target)
+        # Handle NaN values
+        mask = ~(np.isnan(pred_gene) | np.isnan(true_gene))
+        pred_gene = pred_gene[mask]
+        true_gene = true_gene[mask]
         
-        predictions = np.stack(all_predictions)  # Shape: [num_sequences, seq_len, num_genes, num_features]
-        targets = np.stack(all_targets)  # Shape: [num_sequences, seq_len, num_genes, num_features]
+        if len(pred_gene) > 0:
+            corr, _ = pearsonr(pred_gene, true_gene)
+            rmse = np.sqrt(mean_squared_error(true_gene, pred_gene))
+        else:
+            corr = np.nan
+            rmse = np.nan
         
-        print(f"Predictions shape: {predictions.shape}")
-        print(f"Targets shape: {targets.shape}")
+        gene_correlations.append(corr)
+        gene_rmse.append(rmse)
+    
+    # Filter out NaN values for sorting
+    valid_performances = [(gene, corr) for gene, corr in zip(genes, gene_correlations) 
+                         if not np.isnan(corr)]
+    valid_performances.sort(key=lambda x: x[1], reverse=True)
+    
+    metrics['Mean_Correlation'] = np.nanmean(gene_correlations)
+    metrics['Mean_RMSE'] = np.nanmean(gene_rmse)
+    metrics['Best_Genes'] = [gene for gene, _ in valid_performances[:5]]
+    metrics['Worst_Genes'] = [gene for gene, _ in valid_performances[-5:]]
+    
+    # Create gene performance visualization
+    valid_correlations = [c for c in gene_correlations if not np.isnan(c)]
+    valid_rmse = [r for r in gene_rmse if not np.isnan(r)]
+    
+    plt.figure(figsize=(12, 8))
+    plt.scatter(valid_correlations, valid_rmse, alpha=0.5)
+    plt.xlabel('Correlation')
+    plt.ylabel('RMSE')
+    plt.title('Gene Performance Distribution')
+    plt.savefig(f'{save_dir}/gene_performance_distribution.png')
+    plt.close()
+    
+    return metrics
 
-        # 1. Expand the targets array to match the shape of predictions (same number of features)
-        targets_expanded = np.expand_dims(targets, axis=2).squeeze(3)  # Expand to shape: [num_sequences, seq_len, 1, num_features]
-        targets_expanded = np.repeat(targets_expanded, predictions.shape[2], axis=2)  # Repeat to match the number of genes
-        
-        print(f"Expanded Targets shape: {targets_expanded.shape}")
-        print(f"Fixed Predictions shape: {predictions.shape}")
+def calculate_temporal_metrics(predictions, targets, time_points, save_dir):
+    """Calculate temporal stability metrics."""
+    metrics = {}
+    save_dir='plottings_STGCN'
 
-        # 1. Overall Time Series Metrics
-        try:
-            print(f"Flattened predictions shape: {predictions.flatten().shape}")
-            print(f"Flattened targets shape: {targets_expanded.flatten().shape}")
-            
-            metrics['Overall'] = {
-                'MSE': np.mean((predictions - targets_expanded) ** 2),
-                'MAE': np.mean(np.abs(predictions - targets_expanded)),
-                'RMSE': np.sqrt(np.mean((predictions - targets_expanded) ** 2)),
-                'Pearson_Correlation': pearsonr(predictions.flatten(), targets_expanded.flatten())[0],
-                'R2_Score': 1 - np.sum((predictions - targets_expanded) ** 2) / np.sum((targets_expanded - np.mean(targets_expanded)) ** 2)
-            }
-        except ValueError as e:
-            print(f"Error calculating Pearson correlation: {e}")
-            print("Predictions and Targets mismatch!")
-            print(f"Predictions: {predictions}")
-            print(f"Targets: {targets_expanded}")
-            raise e
-        
-        genes = list(dataset.node_map.keys())
-        print(f"Number of genes: {genes}")
-        gene_correlations = []
-        
-        # Iterate over the genes
-        for i in range(predictions.shape[3]):  # Loop over 52 genes (the last dimension)
-            # Debugging: check the current index and the size of `i`
-            print(f"Processing gene index {i}")
-            
-            if i >= predictions.shape[3]:  # Check if the index exceeds the number of genes
-                print(f"Warning: Gene index {i} exceeds the number of genes in predictions!")
-                continue  # Skip this gene if index is out of bounds
-            
-            # Correct indexing along the gene dimension (52)
-            gene_pred = predictions[:, :, :, i]  # Shape: [num_sequences, seq_len, num_features]
-            gene_target = targets_expanded[:, :, :, i]  # Shape: [num_sequences, seq_len, num_features]
-            
-            # Pearson correlation for each gene
-            corr = pearsonr(gene_pred.flatten(), gene_target.flatten())[0]
-            gene_correlations.append(corr)
-            
-            # Plot and save each gene's prediction vs actual values
-            plt.figure(figsize=(10, 6))
-            plt.plot(gene_target[0], label='Actual', alpha=0.7)
-            plt.plot(gene_pred[0], label='Predicted', alpha=0.7)
-            plt.title(f'Gene {i} Prediction (corr={corr:.3f})')
-            plt.legend()
-            plt.savefig(os.path.join(save_dir, f'gene_{i}_prediction.png'))
-            plt.close()
+    # Calculate temporal correlations
+    temporal_correlations = []
+    for t in range(len(predictions)):
+        pred = predictions[t].flatten()
+        true = targets[t].flatten()
+        mask = ~(np.isnan(pred) | np.isnan(true))
+        if mask.any():
+            corr, _ = pearsonr(pred[mask], true[mask])
+            temporal_correlations.append(corr)
+    
+    metrics['Mean_Temporal_Correlation'] = np.nanmean(temporal_correlations)
+    metrics['Temporal_Correlation_Std'] = np.nanstd(temporal_correlations)
+    
+    # Plot temporal stability
+    plt.figure(figsize=(10, 6))
+    plt.plot(temporal_correlations, marker='o')
+    plt.xlabel('Time Step')
+    plt.ylabel('Correlation')
+    plt.title('Temporal Stability of Predictions')
+    plt.grid(True)
+    plt.savefig(f'{save_dir}/temporal_stability.png')
+    plt.close()
+    
+    return metrics
 
-        metrics['Gene_Performance'] = {
-            'Mean_Correlation': np.mean(gene_correlations),
-            'Median_Correlation': np.median(gene_correlations),
-            'Std_Correlation': np.std(gene_correlations),
-            'Best_Genes': [genes[i] for i in np.argsort(gene_correlations)[-5:]],
-            'Worst_Genes': [genes[i] for i in np.argsort(gene_correlations)[:5]]
-        }
+def create_evaluation_plots(predictions, targets, dataset, save_dir):
+    """Create comprehensive evaluation visualizations."""
+    save_dir='plottings_STGCN'
+
+    # 1. Overall prediction scatter plot
+    plt.figure(figsize=(10, 10))
+    pred_flat = predictions.flatten()
+    target_flat = targets.flatten()
+    mask = ~(np.isnan(pred_flat) | np.isnan(target_flat))
+    plt.scatter(target_flat[mask], pred_flat[mask], alpha=0.1)
+    plt.plot([min(target_flat[mask]), max(target_flat[mask])], 
+             [min(target_flat[mask]), max(target_flat[mask])], 'r--')
+    plt.xlabel('True Values')
+    plt.ylabel('Predicted Values')
+    plt.title('Overall Prediction Performance')
+    plt.savefig(f'{save_dir}/overall_scatter.png')
+    plt.close()
+    
+    # 2. Temporal predictions for top genes
+    top_genes = list(dataset.node_map.keys())[:5]
+    plt.figure(figsize=(15, 10))
+    
+    for i, gene in enumerate(top_genes):
+        gene_idx = dataset.node_map[gene]
+        plt.subplot(3, 2, i+1)
+        plt.plot(targets[:, 0, gene_idx], label='True', marker='o')
+        plt.plot(predictions[:, 0, gene_idx], label='Predicted', marker='s')
+        plt.title(f'Gene: {gene}')
+        plt.xlabel('Time Step')
+        plt.ylabel('Expression')
+        plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig(f'{save_dir}/temporal_predictions.png')
+    plt.close()
+    
+    # 3. Correlation heatmap
+    pred_corr = np.corrcoef(predictions.mean(axis=0).T)
+    true_corr = np.corrcoef(targets.mean(axis=0).T)
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    
+    sns.heatmap(true_corr, ax=ax1, cmap='coolwarm')
+    ax1.set_title('True Gene Correlations')
+    
+    sns.heatmap(pred_corr, ax=ax2, cmap='coolwarm')
+    ax2.set_title('Predicted Gene Correlations')
+    
+    plt.tight_layout()
+    plt.savefig(f'{save_dir}/correlation_heatmaps.png')
+    plt.close()
+
+def process_batch_evaluation(seq, label):
+    """Process batch data for evaluation."""
+    x = torch.stack([g.x for g in seq])
+    x = x.permute(2, 0, 1).unsqueeze(0)
+    
+    target = torch.stack([g.x for g in label])
+    target = target.permute(2, 0, 1).unsqueeze(0)
+    
+    return x, target
+
+def create_detailed_gene_plots(predictions, targets, dataset, save_dir):
+    save_dir='plottings_STGCN'
+    os.makedirs(save_dir, exist_ok=True)
+    genes = list(dataset.node_map.keys())
+    num_genes = len(genes)
+
+    genes_per_page = 5
+    num_pages = (num_genes + genes_per_page - 1) // genes_per_page
+
+    for page in range(num_pages):
+        start_idx = page * genes_per_page
+        end_idx = min((page + 1) * genes_per_page, num_genes)
+        current_genes = genes[start_idx:end_idx]
+
+        fig, axes = plt.subplots(5, 4, figsize=(10, 20))
+        fig.suptitle(f'Gene Predictions vs Actuals (Page {page+1}/{num_pages})', fontsize=16)
+        axes = axes.flatten()
+
+        for i,gene in enumerate(current_genes):
+            gene_idx = dataset.node_map[gene]
+            pred = predictions[:,0,gene_idx]
+            true = targets[:,0, gene_idx]
+
+            if not (np.isnan(pred).any() or np.isnan(true).any()):
+                corr, p_value = pearsonr(pred, true)
+                corr_text = f'Correlation: {corr:.3f}\np-value: {p_value:.3e}'
+            else:
+                corr_text = 'Correlation: N/A'
+
+            # Create subplot
+            ax = axes[i]
+            ax.plot(true, label='Actual', marker='o')
+            ax.plot(pred, label='Predicted', marker='s')
+            ax.set_title(f'Gene: {gene}\n{corr_text}')
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Expression Level')
+            ax.legend()
+            ax.grid(True)
+
+            rmse = np.sqrt(np.mean((pred - true) ** 2))
+            ax.text(0.05, 0.95, f'RMSE: {rmse:.3f}', 
+                   transform=ax.transAxes, 
+                   verticalalignment='top')
         
-        # 2. Temporal Stability Metrics
-        temporal_corrs = []
-        for t in range(predictions.shape[1]):  # Loop through time steps
-            corr = pearsonr(predictions[:, t, :, :].flatten(), targets_expanded[:, t, :, :].flatten())[0]
-            temporal_corrs.append(corr)
+        for j in range(len(current_genes), len(axes)):
+            axes[j].set_visible(False)
         
-        metrics['Temporal_Stability'] = {
-            'Mean_Temporal_Correlation': np.mean(temporal_corrs),
-            'Std_Temporal_Correlation': np.std(temporal_corrs),
-            'Min_Temporal_Correlation': np.min(temporal_corrs),
-            'Max_Temporal_Correlation': np.max(temporal_corrs)
-        }
-        
-        # 3. Save evaluation results to file
-        with open(os.path.join(save_dir, 'full_evaluation.txt'), 'w') as f:
-            f.write("Model Evaluation Results\n\n")
-            for category, category_metrics in metrics.items():
-                f.write(f"\n{category}:\n")
-                for metric, value in category_metrics.items():
-                    if isinstance(value, (float, int)):
-                        f.write(f"{metric}: {value:.4f}\n")
-                    else:
-                        f.write(f"{metric}: {value}\n")
-        
-        return metrics
+        plt.tight_layout()
+        plt.savefig(f'{save_dir}/gene_predictions_page_{page+1}.png', 
+                   bbox_inches='tight', dpi=300)
+        plt.close()
     
 class Args:
     def __init__(self):
@@ -658,16 +805,18 @@ if __name__ == "__main__":
     plt.title('STGCN Training Progress')
     plt.legend()
     plt.grid(True)
-    plt.savefig('stgcn_training_progress.png')
+    plt.savefig('plottings_STGCN/stgcn_training_progress.png')
     plt.close()
 
-    interaction_corr = analyze_interactions(model, val_sequences, val_labels, dataset)
-    mean_corr = analyze_gene(model, val_sequences, val_labels, dataset)
-
+    # After training
     metrics = evaluate_model_performance(
-    model, val_sequences, val_labels, dataset, save_dir='evaluation_results'
+    model, 
+    val_sequences, 
+    val_labels, 
+    dataset,
+    save_dir='evaluation_results'
+    )
 
-)
     print("\nModel Performance Summary:")
     print(f"Overall Pearson Correlation: {metrics['Overall']['Pearson_Correlation']:.4f}")
     print(f"RMSE: {metrics['Overall']['RMSE']:.4f}")
