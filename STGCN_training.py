@@ -20,6 +20,7 @@ from STGCN.model.models import STGCNChebGraphConv
 import argparse
 from scipy.spatial.distance import cdist
 from create_graph_and_embeddings_STGCN import *
+from STGCN_losses import temporal_pattern_loss, change_magnitude_loss
     
 def process_batch(seq, label):
     """Process batch data for training."""
@@ -30,17 +31,25 @@ def process_batch(seq, label):
     #print(f"Input mean: {x.mean():.4f}")
     x = x.permute(2, 0, 1).unsqueeze(0)  # [1, channels, time_steps, nodes]
     
-    #print("\n=== Target Statistics ===")
     target = torch.stack([g.x for g in label])
-    #print(f"Target shape: {target.shape}")
-    #print(f"Target range: [{target.min():.4f}, {target.max():.4f}]")
-    #print(f"Target mean: {target.mean():.4f}")
 
     target = target.permute(2, 0, 1).unsqueeze(0)  # [1, channels, time_steps, nodes]
     
     # Take only the last time step of target
-    target = target[:, :, -1:, :]  # [1, channels, 1, nodes]
+    #target = target[:, :, -1:, :]  # [1, channels, 1, nodes] not take for temporal loss and relations!!!!!
+    #print(f"Input sequence shape: {x.shape}")
+    #print(f"Target shape: {target.shape}")
+
+    print("\n=== Batch Statistics ===")
+    print("Input sequence:")
+    for t in range(x.shape[0]):
+        changes = x[t] - x[t-1] if t > 0 else torch.zeros_like(x[0])
+        print(f"Time step {t}:")
+        print(f"Values range: [{x[t].min():.4f}, {x[t].max():.4f}]")
+        print(f"Changes range: [{changes.min():.4f}, {changes.max():.4f}]")
     
+    print("\nTarget:")
+    print(f"Range: [{target.min():.4f}, {target.max():.4f}]")
     return x, target
 
 def calculate_correlation(tensor):
@@ -49,53 +58,6 @@ def calculate_correlation(tensor):
     tensor = tensor.squeeze(0) # remove batch
     tensor = tensor.view(tensor.size(0), -1) # [channels, time*nodes]
     return torch.corrcoef(tensor)
-
-def temporal_loss(output, target, alpha=0.5, beta=0.3):
-
-    print("\nInput Checks:")
-    print(f"Output range: [{output.min().item():.6f}, {output.max().item():.6f}]")
-    print(f"Target range: [{target.min().item():.6f}, {target.max().item():.6f}]")
-    
-    mse_loss = F.mse_loss(output, target)
-    
-    try:
-        print(f"\nTemporal dimension sizes:")
-        print(f"Output temporal dim: {output.shape[2]}")
-        print(f"Target temporal dim: {target.shape[2]}")
-        
-        if output.shape[2] < 2 or target.shape[2] < 2:
-            print("WARNING: Not enough time steps for temporal loss!")
-            return mse_loss
-        
-        output_diff = output[:, :, 1:, :] - output[:, :, :-1, :]
-        target_diff = target[:, :, 1:, :] - target[:, :, :-1, :]
-        
-        print("\nDifference statistics:")
-        print(f"Output diff range: [{output_diff.min().item():.6f}, {output_diff.max().item():.6f}]")
-        print(f"Target diff range: [{target_diff.min().item():.6f}, {target_diff.max().item():.6f}]")
-        
-        eps = 1e-8
-        direction_loss = torch.mean((torch.sign(output_diff + eps) != torch.sign(target_diff + eps)).float())
-
-        output_mag = torch.abs(output_diff)
-        target_mag = torch.abs(target_diff)
-        
-        magnitude_loss = F.mse_loss(
-            output_mag / (output_mag.max() + eps),
-            target_mag / (target_mag.max() + eps)
-        )
-        
-        print("\nLoss Components:")
-        print(f"MSE Loss: {mse_loss.item():.6f}")
-        print(f"Direction Loss: {direction_loss.item():.6f}")
-        print(f"Magnitude Loss: {magnitude_loss.item():.6f}")
-        
-        total_loss = mse_loss + alpha * direction_loss + beta * magnitude_loss
-        return total_loss
-        
-    except Exception as e:
-        print(f"Error in temporal loss calculation: {str(e)}")
-        return mse_loss
 
 def train_stgcn(dataset, val_ratio=0.2):
 
@@ -198,7 +160,7 @@ def train_stgcn(dataset, val_ratio=0.2):
 
             all_targets.append(target.detach().cpu().numpy())
             all_outputs.append(output.detach().cpu().numpy())
-            loss = temporal_loss(output, target)
+            loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
 
             loss.backward()
             optimizer.step()
@@ -229,11 +191,11 @@ def train_stgcn(dataset, val_ratio=0.2):
                 # Don't take the last point for temporal loss!!!
                 #target = target[:, :, -1:, :]  
                 #output = output[:, :, -1:, :]
-                
+
                 #print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
                 #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
-                val_loss = temporal_loss(output, target)
+                val_loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
                 val_loss_total += val_loss.item()
 
                 output_corr = calculate_correlation(output)

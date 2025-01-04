@@ -82,74 +82,74 @@ class TemporalGraphDataset:
     
     
     def create_temporal_node_features_several_graphs_created(self):
-        """Create temporal node features with correct dimensionality"""
         temporal_features = {}
-        nodes = list(self.node_map.keys())
+        
+        # First, normalize all expression values across all time points
+        print("\nNormalizing expression values across all time points...")
+        all_expressions = []
+        for t in self.time_points:
+            for gene in self.node_map.keys():
+                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                all_expressions.append(expr_value)
 
-        print("\n=== Initial Data Statistics ===")
+                #print(f"\nTime point {t}:")
+                #print(f"Expression range: [{np.min(all_expressions):.4f}, {np.max(all_expressions):.4f}]")
+                #print(f"Mean: {np.mean(all_expressions):.4f}")
+                #print(f"Std: {np.std(all_expressions):.4f}")
+        
+        # Global normalization parameters
+        global_min = min(all_expressions)
+        global_max = max(all_expressions)
+        print(f"Global expression range: [{global_min:.4f}, {global_max:.4f}]")
+        
         for t in self.time_points:
             print(f"\nProcessing time point {t}")
-
+            
+            # First get normalized expression values
+            expression_values = {}
+            for gene in self.node_map.keys():
+                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                # min-max global normalization
+                expression_values[gene] = (expr_value - global_min) / (global_max - global_min)
+            
+            # Create graph using normalized expression values
             G = nx.Graph()
             G.add_nodes_from(self.node_map.keys())
-
-            gene1_expr = self.df[f'Gene1_Time_{t}'].values
-            gene2_expr = self.df[f'Gene2_Time_{t}'].values
-            all_expr = np.concatenate([gene1_expr, gene2_expr])
-            print(f"\nTime point {t}:")
-            print(f"Expression range: [{np.min(all_expr):.4f}, {np.max(all_expr):.4f}]")
-            print(f"Mean: {np.mean(all_expr):.4f}")
-            print(f"Std: {np.std(all_expr):.4f}")
             
-            # Create graph for this time point
-            G = nx.Graph()
-            G.add_nodes_from(self.node_map.keys())
-            
-            # Add edges with weights
-            edge_weights = []
+            # Add edges with normalized weights
             for _, row in self.df.iterrows():
-                gene1_expr = row[f'Gene1_Time_{t}']
-                gene2_expr = row[f'Gene2_Time_{t}']
+                gene1 = row['Gene1_clean']
+                gene2 = row['Gene2_clean']
                 
-                # Calculate edge weights incorporating temporal information
+                # Use normalized expression values for similarity calculation
+                expr_sim = 1 / (1 + abs(expression_values[gene1] - expression_values[gene2]))
+                
+                # Calculate other similarities
                 hic_weight = row['HiC_Interaction']
                 compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
                 tad_dist = abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance'])
                 tad_sim = 1 / (1 + tad_dist)
                 ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
-                expr_sim = 1 / (1 + abs(gene1_expr - gene2_expr))
                 
-                # more temporal focus weights for new model
-                weight = (hic_weight * 0.25 +  # 25% HiC
-                compartment_sim * 0.1 +        # 10% Compartment
-                tad_sim * 0.1 +                # 10% TAD
-                ins_sim * 0.05 +               # 5% Insulation
-                expr_sim * 0.5)
-                edge_weights.append((row['Gene1_clean'], row['Gene2_clean'], weight))
-     
-            #G.add_edge(row['Gene1_clean'], row['Gene2_clean'], weight=weight)
+                # Combine weights
+                weight = (hic_weight * 0.25 +
+                        compartment_sim * 0.1 +
+                        tad_sim * 0.1 +
+                        ins_sim * 0.05 +
+                        expr_sim * 0.5)
                 
-            # Normalize edge weights to [0,1]
-            weights = np.array([w for _, _, w in edge_weights])
-            min_weight = np.min(weights)
-            max_weight = np.max(weights)
-            normalized_weights = (weights - min_weight) / (max_weight - min_weight)
+                G.add_edge(gene1, gene2, weight=weight)
             
-            # Add normalized edges to graph
-            for (gene1, gene2, _), norm_weight in zip(edge_weights, normalized_weights):
-                G.add_edge(gene1, gene2, weight=norm_weight)
-            
-            edge_weights_dict = nx.get_edge_attributes(G, 'weight')
-            min_weight = min(edge_weights_dict.values())
-            max_weight = max(edge_weights_dict.values())
-
-            print("\nGraph Statistics:")
-            print(f"Number of edges: {G.number_of_edges()}")
-            print(f"Edge weight range: [{min_weight:.4f}, {max_weight:.4f}]")
-            # Create Node2Vec embeddings with exact embedding_dim dimensions
+            # Create Node2Vec embeddings
             node2vec = Node2Vec(
                 G,
-                dimensions=self.embedding_dim,  # Use full embedding dimension
+                dimensions=self.embedding_dim,
                 walk_length=20,
                 num_walks=150,
                 workers=1,
@@ -159,50 +159,26 @@ class TemporalGraphDataset:
             )
             
             model = node2vec.fit(
-            window=15,      # Increased from 10
-            min_count=1,
-            batch_words=4   # Added batch processing
-        )
-            expression_values = {}
-            for gene in self.node_map.keys():
-                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
-                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
-                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
-                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
-                expression_values[gene] = expr_value
+                window=15,
+                min_count=1,
+                batch_words=4
+            )
             
-            # Normalize expression values
-            expr_min = min(expression_values.values())
-            expr_max = max(expression_values.values())
-            normalized_expressions = {
-                gene: (val - expr_min) / (expr_max - expr_min)
-                for gene, val in expression_values.items()
-            }
-            
-            # Create features for all nodes
+            # Create feature vectors
             features = []
             for gene in self.node_map.keys():
                 # Get Node2Vec embedding
                 node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
-                # still I am seeing negative values for node embeddings
-                node_embedding = (node_embedding - node_embedding.min()) / (node_embedding.max() - node_embedding.min())
                 
-                # Get expression value for this time point
-                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
-                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
-                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
-                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                # Normalize embedding
+                node_embedding = (node_embedding - node_embedding.min()) / (node_embedding.max() - node_embedding.min() + 1e-8)
                 
-                # Modify last dimension of embedding to incorporate expression
-                node_embedding[-1] = normalized_expressions[gene]
+                # Last dimension is the normalized expression value
+                node_embedding[-1] = expression_values[gene]
                 
                 features.append(node_embedding)
             
-            # Stack features
             temporal_features[t] = torch.stack(features)
-
-            #for t, features in temporal_features.items():
-            #    print(f"Time {t}: Feature shape {features.shape}")
 
             # After creating Node2Vec embeddings
             print("\n=== Node2Vec Embedding Statistics ===")
@@ -214,21 +190,15 @@ class TemporalGraphDataset:
             for i in range(min(3, len(self.node_map))):
                 gene = list(self.node_map.keys())[i]
                 print(f"{gene}: {temporal_features[t][i, :5]}")
-
-            #print(f"Sample Node2Vec embedding for a node: {temporal_features[self.time_points[0]][0, :5]}")
-
-            # Verify dimensions for first time point
-            if t == self.time_points[0]:
-                print(f"\nFeature verification for time {t}:")
-                print(f"Feature shape: {temporal_features[t].shape}")
-                print(f"Expected shape: ({len(self.node_map)}, {self.embedding_dim})")
-                
-                # Verify content
-                first_gene = list(self.node_map.keys())[0]
-                print(f"\nExample features for {first_gene}:")
-                print(f"Shape: {temporal_features[t][0].shape}")
-                print(f"First 5 values: {temporal_features[t][0, :5]}")
-                print(f"Expression value (last dim): {temporal_features[t][0, -1]}")
+            
+            # Print diagnostics
+            print(f"\nFeature Statistics for time {t}:")
+            print(f"Expression range: [{min(expression_values.values()):.4f}, {max(expression_values.values()):.4f}]")
+            print(f"Embedding range: [{temporal_features[t].min():.4f}, {temporal_features[t].max():.4f}]")
+            print(f"Sample embeddings for first 3 genes:")
+            for i in range(3):
+                gene = list(self.node_map.keys())[i]
+                print(f"{gene}: {temporal_features[t][i, :5]}, Expression: {expression_values[gene]:.4f}")
         
         return temporal_features
 
@@ -258,16 +228,20 @@ class TemporalGraphDataset:
         )
     
     def get_temporal_sequences(self):
-        """Create temporal sequences for training"""
         sequences = []
         labels = []
-        print("\n=== Sequence Creation Statistics ===")
-        print(f"Time points: {self.time_points}")
-        print(f"Sequence length: {self.seq_len}")
-        print(f"Prediction length: {self.pred_len}")
-
-        #print("\nTime points being used:")
-        #print(f"All time points: {self.time_points}")
+        print("\n=== Raw Data Check ===")
+        for t in self.time_points[:5]:  # Check first 5 time points
+            all_values = []
+            for gene in self.node_map.keys():
+                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                values = np.concatenate([gene1_expr, gene2_expr])
+                all_values.extend(values)
+        
+            print(f"Time {t}:")
+            print(f"Range: [{min(all_values):.4f}, {max(all_values):.4f}]")
+            print(f"Changes from previous: {np.mean(np.diff(all_values)):.4f}")
         
         for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
             seq_graphs = [self.get_pyg_graph(t) for t in self.time_points[i:i+self.seq_len]]
