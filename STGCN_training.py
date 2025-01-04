@@ -16,7 +16,7 @@ from STGCN.model.models import *
 import sys
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 sys.path.append('./STGCN')
-from STGCN.model.models import STGCNChebGraphConv
+from STGCN.model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected
 import argparse
 from scipy.spatial.distance import cdist
 from create_graph_and_embeddings_STGCN import *
@@ -24,23 +24,13 @@ from STGCN_losses import temporal_pattern_loss, change_magnitude_loss
     
 def process_batch(seq, label):
     """Process batch data for training."""
-    #print("\nDebug shapes:")
-    # Stack sequence graphs with Node2Vec embeddings
-    x = torch.stack([g.x for g in seq])  # [seq_len, num_nodes, features(32)]
-    #print(f"Initial x shape: {x.shape}")  # Should be [3, 52, 32] correct
+    # Input: Use full embeddings
+    x = torch.stack([g.x for g in seq])  # [seq_len, num_nodes, features]
+    x = x.permute(2, 0, 1).unsqueeze(0)  # [1, features, seq_len, nodes]
     
-    # For target, we only have expression values
-    target = torch.stack([g.x for g in label])  # [pred_len, num_nodes]
-    #print(f"Initial target shape: {target.shape}")  # Should be [1, 52, 32] correct
-    
-    # Permute to [batch, features, time_steps, num_nodes]
-    x = x.permute(2, 0, 1).unsqueeze(0)  # [1, 32, seq_len, 52]
-    #print(f"After permute x shape: {x.shape}")
-    target = target.permute(2, 0, 1).unsqueeze(0)  # [1, 1, 1, 52]
-    #print(f"After permute target shape: {target.shape}")
-    
-    #print(f"Final x shape: {x.shape}") # Final x shape: torch.Size([1, 32, 3, 52])
-    #print(f"Final target shape: {target.shape}") # Final target shape: torch.Size([1, 32, 1, 52])
+    # Target: Use only expression values
+    target = torch.stack([g.x[:, -1] for g in label])  # [1, nodes] (expression values)
+    target = target.unsqueeze(1).unsqueeze(0)  # [1, 1, 1, nodes]
     
     return x, target
 
@@ -103,7 +93,7 @@ def train_stgcn(dataset, val_ratio=0.2):
     print(f"Number of validation sequences: {len(val_sequences)}")
     
     # Initialize STGCN
-    model = STGCNChebGraphConv(args, args.blocks, args.n_vertex)
+    model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
     model = model.float() # convert model to float otherwise I am getting type error
 
     optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)
@@ -283,9 +273,9 @@ def analyze_temporal_patterns(model, val_sequences, val_labels, dataset, save_di
 
         plt.figure(figsize=(15,10))
         genes = list(dataset.node_map.keys())
-        #num_genes_to_plot = min(6, len(genes))
+        num_genes_to_plot = min(6, len(genes))
 
-        for i in range(len(genes)):
+        for i in range(num_genes_to_plot):
             plt.subplot(3,2, i+1)
             gene_idx = dataset.node_map[genes[i]]
             # Plot actual vs predicted values over time
@@ -432,42 +422,19 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_d
     
     with torch.no_grad():
         for seq, label in zip(val_sequences, val_labels):
-            x, target = process_batch_evaluation(seq, label)
-            output = model(x)
+            x, target = process_batch(seq, label)  # Now returns expression values for target
+            output = model(x)  # Output is now [batch, 1, time_steps, nodes]
             
-            # Take only the last time step of predictions to match target
-            output = output[:, :, -1:, :]  # Shape: [1, channels, 1, nodes]
+            # Already single channel, just take last time step
+            output = output[:, 0, -1:, :]  # Shape: [1, 1, nodes]
+            target = target[:, 0, :, :]    # Shape: [1, 1, nodes]
             
             # Reshape for evaluation
-            pred = output.squeeze().cpu().numpy()  # Shape: [channels, nodes]
-            true = target.squeeze().cpu().numpy()  # Shape: [channels, nodes]
+            pred = output.squeeze().cpu().numpy()  # Shape: [nodes]
+            true = target.squeeze().cpu().numpy()  # Shape: [nodes]
             
             all_predictions.append(pred)
             all_targets.append(true)
-    
-    # Stack all predictions and targets
-    predictions = np.stack(all_predictions, axis=0)  # [samples, channels, nodes]
-    targets = np.stack(all_targets, axis=0)  # [samples, channels, nodes]
-    
-    # Calculate overall metrics
-    metrics['Overall'] = calculate_overall_metrics(predictions, targets)
-    
-    # Calculate gene-wise metrics
-    metrics['Gene_Performance'] = calculate_gene_metrics(
-        predictions, targets, dataset.node_map, save_dir
-    )
-    
-    # Calculate temporal stability metrics
-    metrics['Temporal_Stability'] = calculate_temporal_metrics(
-        predictions, targets
-    )
-    
-    # Create visualizations
-    create_evaluation_plots(predictions, targets, dataset, save_dir)
-    gene_summary = create_detailed_gene_plots(predictions, targets, dataset, 
-                                            save_dir=f'{save_dir}/gene_plots')
-    
-    return metrics
 
 def calculate_overall_metrics(predictions, targets):
     """Calculate overall model performance metrics."""
@@ -623,47 +590,39 @@ def create_evaluation_plots(predictions, targets, dataset, save_dir):
     plt.scatter(target_flat[mask], pred_flat[mask], alpha=0.1)
     plt.plot([min(target_flat[mask]), max(target_flat[mask])], 
              [min(target_flat[mask]), max(target_flat[mask])], 'r--')
-    plt.xlabel('True Values')
-    plt.ylabel('Predicted Values')
-    plt.title('Overall Prediction Performance')
-    plt.show()
-    plt.savefig(f'{save_dir}/overall_scatter.png')
+    plt.xlabel('True Expression Values')
+    plt.ylabel('Predicted Expression Values')
+    plt.title('Expression Prediction Performance')
+    plt.savefig(f'{save_dir}/expression_scatter.png')
     plt.close()
     
-    # 2. Temporal predictions for top genes
-    top_genes = list(dataset.node_map.keys())[:5]
-    plt.figure(figsize=(15, 10))
+    # 2. Temporal predictions for genes
+    genes = list(dataset.node_map.keys())
+    plt.figure(figsize=(15, 15))
     
-    for i, gene in enumerate(top_genes):
-        gene_idx = dataset.node_map[gene]
-        plt.subplot(3, 2, i+1)
-        plt.plot(targets[:, 0, gene_idx], label='True', marker='o')
-        plt.plot(predictions[:, 0, gene_idx], label='Predicted', marker='s')
-        plt.title(f'Gene: {gene}')
-        plt.xlabel('Time Step')
-        plt.ylabel('Expression')
-        plt.legend()
+    # Plot actual changes vs predicted changes
+    plt.subplot(2, 1, 1)
+    actual_changes = np.diff(targets, axis=0)
+    pred_changes = np.diff(predictions, axis=0)
+    plt.hist(actual_changes.flatten(), bins=50, alpha=0.5, label='Actual Changes')
+    plt.hist(pred_changes.flatten(), bins=50, alpha=0.5, label='Predicted Changes')
+    plt.xlabel('Expression Change')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of Expression Changes')
+    plt.legend()
     
+    # Plot temporal patterns
+    plt.subplot(2, 1, 2)
+    for i in range(min(5, len(genes))):
+        gene_idx = dataset.node_map[genes[i]]
+        plt.plot(targets[:, gene_idx], '--', label=f'{genes[i]} (True)', alpha=0.7)
+        plt.plot(predictions[:, gene_idx], '-', label=f'{genes[i]} (Pred)', alpha=0.7)
+    plt.xlabel('Time Step')
+    plt.ylabel('Expression Value')
+    plt.title('Temporal Expression Patterns')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    plt.show()
-    plt.savefig(f'{save_dir}/temporal_predictions.png')
-    plt.close()
-    
-    # 3. Correlation heatmap
-    pred_corr = np.corrcoef(predictions.mean(axis=0).T)
-    true_corr = np.corrcoef(targets.mean(axis=0).T)
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
-    
-    sns.heatmap(true_corr, ax=ax1, cmap='coolwarm')
-    ax1.set_title('True Gene Correlations')
-    
-    sns.heatmap(pred_corr, ax=ax2, cmap='coolwarm')
-    ax2.set_title('Predicted Gene Correlations')
-    
-    plt.tight_layout()
-    plt.show()
-    plt.savefig(f'{save_dir}/correlation_heatmaps.png')
+    plt.savefig(f'{save_dir}/temporal_patterns.png')
     plt.close()
 
 def process_batch_evaluation(seq, label):
@@ -675,6 +634,24 @@ def process_batch_evaluation(seq, label):
     target = target.permute(2, 0, 1).unsqueeze(0)
     
     return x, target
+
+def analyze_prediction_changes(predictions, targets, dataset):
+    """Analyze how well the model predicts changes in expression."""
+    actual_changes = np.diff(targets, axis=0)
+    pred_changes = np.diff(predictions, axis=0)
+    
+    # Calculate direction accuracy
+    direction_accuracy = np.mean(np.sign(actual_changes) == np.sign(pred_changes))
+    
+    # Calculate magnitude accuracy
+    magnitude_ratio = np.abs(pred_changes) / (np.abs(actual_changes) + 1e-8)
+    magnitude_accuracy = np.mean((magnitude_ratio >= 0.5) & (magnitude_ratio <= 2.0))
+    
+    print("\nChange Prediction Analysis:")
+    print(f"Direction Accuracy: {direction_accuracy:.4f}")
+    print(f"Magnitude Accuracy: {magnitude_accuracy:.4f}")
+    print(f"Average Actual Change: {np.abs(actual_changes).mean():.4f}")
+    print(f"Average Predicted Change: {np.abs(pred_changes).mean():.4f}")
 
 def create_detailed_gene_plots(predictions, targets, dataset, save_dir):
     save_dir='plottings_STGCN'
