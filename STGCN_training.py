@@ -23,10 +23,19 @@ from create_graph_and_embeddings_STGCN import *
     
 def process_batch(seq, label):
     """Process batch data for training."""
+    print("\n=== Input Sequence Statistics ===")
     x = torch.stack([g.x for g in seq])
+    print(f"Input shape: {x.shape}")
+    print(f"Input range: [{x.min():.4f}, {x.max():.4f}]")
+    print(f"Input mean: {x.mean():.4f}")
     x = x.permute(2, 0, 1).unsqueeze(0)  # [1, channels, time_steps, nodes]
     
+    print("\n=== Target Statistics ===")
     target = torch.stack([g.x for g in label])
+    print(f"Target shape: {target.shape}")
+    print(f"Target range: [{target.min():.4f}, {target.max():.4f}]")
+    print(f"Target mean: {target.mean():.4f}")
+
     target = target.permute(2, 0, 1).unsqueeze(0)  # [1, channels, time_steps, nodes]
     
     # Take only the last time step of target
@@ -114,7 +123,9 @@ def train_stgcn(dataset, val_ratio=0.2):
         model.train()
         total_loss = 0
         batch_stats = []
-
+        all_targets = []
+        all_outputs = []
+        
         for seq,label in zip(train_sequences, train_labels):
             optimizer.zero_grad()
             x,target = process_batch(seq, label)
@@ -134,16 +145,24 @@ def train_stgcn(dataset, val_ratio=0.2):
                 'target_mean': target.mean().item(),
                 'output_mean': output.mean().item()
             })
+
+            all_targets.append(target.detach().cpu().numpy())
+            all_outputs.append(output.detach().cpu().numpy())
             loss = criterion(output, target)
 
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
 
-        if epoch % 10 == 0:
-            print(f"\nEpoch {epoch} Statistics:")
-            df = pd.DataFrame(batch_stats)
-            print(df.describe())
+        if epoch % 5 == 0:
+            targets = np.concatenate(all_targets)
+            outputs = np.concatenate(all_outputs)
+            print(f"\nEpoch {epoch} Detailed Statistics:")
+            print(f"Target range: [{targets.min():.4f}, {targets.max():.4f}]")
+            print(f"Target mean: {targets.mean():.4f}")
+            print(f"Output range: [{outputs.min():.4f}, {outputs.max():.4f}]")
+            print(f"Output mean: {outputs.mean():.4f}")
+            print(f"Loss: {total_loss/len(train_sequences):.4f}")
 
         model.eval()
         val_loss = 0
