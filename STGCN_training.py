@@ -50,6 +50,53 @@ def calculate_correlation(tensor):
     tensor = tensor.view(tensor.size(0), -1) # [channels, time*nodes]
     return torch.corrcoef(tensor)
 
+def temporal_loss(output, target, alpha=0.5, beta=0.3):
+
+    print("\nInput Checks:")
+    print(f"Output range: [{output.min().item():.6f}, {output.max().item():.6f}]")
+    print(f"Target range: [{target.min().item():.6f}, {target.max().item():.6f}]")
+    
+    mse_loss = F.mse_loss(output, target)
+    
+    try:
+        print(f"\nTemporal dimension sizes:")
+        print(f"Output temporal dim: {output.shape[2]}")
+        print(f"Target temporal dim: {target.shape[2]}")
+        
+        if output.shape[2] < 2 or target.shape[2] < 2:
+            print("WARNING: Not enough time steps for temporal loss!")
+            return mse_loss
+        
+        output_diff = output[:, :, 1:, :] - output[:, :, :-1, :]
+        target_diff = target[:, :, 1:, :] - target[:, :, :-1, :]
+        
+        print("\nDifference statistics:")
+        print(f"Output diff range: [{output_diff.min().item():.6f}, {output_diff.max().item():.6f}]")
+        print(f"Target diff range: [{target_diff.min().item():.6f}, {target_diff.max().item():.6f}]")
+        
+        eps = 1e-8
+        direction_loss = torch.mean((torch.sign(output_diff + eps) != torch.sign(target_diff + eps)).float())
+
+        output_mag = torch.abs(output_diff)
+        target_mag = torch.abs(target_diff)
+        
+        magnitude_loss = F.mse_loss(
+            output_mag / (output_mag.max() + eps),
+            target_mag / (target_mag.max() + eps)
+        )
+        
+        print("\nLoss Components:")
+        print(f"MSE Loss: {mse_loss.item():.6f}")
+        print(f"Direction Loss: {direction_loss.item():.6f}")
+        print(f"Magnitude Loss: {magnitude_loss.item():.6f}")
+        
+        total_loss = mse_loss + alpha * direction_loss + beta * magnitude_loss
+        return total_loss
+        
+    except Exception as e:
+        print(f"Error in temporal loss calculation: {str(e)}")
+        return mse_loss
+
 def train_stgcn(dataset, val_ratio=0.2):
 
     args = Args()
@@ -106,7 +153,7 @@ def train_stgcn(dataset, val_ratio=0.2):
     model = model.float() # convert model to float otherwise I am getting type error
 
     optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)
-    criterion = nn.MSELoss()
+    #criterion = nn.MSELoss()
 
     num_epochs = 100
     best_val_loss = float('inf')
@@ -148,7 +195,7 @@ def train_stgcn(dataset, val_ratio=0.2):
 
             all_targets.append(target.detach().cpu().numpy())
             all_outputs.append(output.detach().cpu().numpy())
-            loss = criterion(output, target)
+            loss = temporal_loss(output, target)
 
             loss.backward()
             optimizer.step()
@@ -180,7 +227,7 @@ def train_stgcn(dataset, val_ratio=0.2):
                 #print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
                 #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
-                val_loss = criterion(output, target)
+                val_loss = temporal_loss(output, target)
                 val_loss_total += val_loss.item()
 
                 output_corr = calculate_correlation(output)
@@ -765,7 +812,7 @@ if __name__ == "__main__":
     )
 
     analyze_temporal_patterns(model, val_sequences, val_labels, dataset)
-    
+
     print("\nModel Performance Summary:")
     print(f"Overall Metrics:")
     print(f"Pearson Correlation: {metrics['Overall']['Pearson_Correlation']:.4f}")
