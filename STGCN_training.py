@@ -184,8 +184,11 @@ def train_stgcn(dataset, val_ratio=0.2):
             #_, target = process_batch(seq, label)
             #target = target[:,:,-1:, :]
             #print(f"Shape of target: {target.shape}") # --> [32, 1, 52]
-            target = target[:, :, -1:, :]  # Keep only the last timestep
-            output = output[:, :, -1:, :]
+
+            # Don't take the last point for temporal loss !!!!!!
+            #target = target[:, :, -1:, :]  # Keep only the last timestep
+            #output = output[:, :, -1:, :]
+
             batch_stats.append({
                 'target_range': [target.min().item(), target.max().item()],
                 'output_range': [output.min().item(), output.max().item()],
@@ -222,8 +225,11 @@ def train_stgcn(dataset, val_ratio=0.2):
                 
                 output = model(x)
                 #_, target = process_batch(seq, label)
-                target = target[:, :, -1:, :]  
-                output = output[:, :, -1:, :]
+
+                # Don't take the last point for temporal loss!!!
+                #target = target[:, :, -1:, :]  
+                #output = output[:, :, -1:, :]
+                
                 #print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
                 #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
