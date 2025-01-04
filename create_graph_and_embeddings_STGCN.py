@@ -230,70 +230,68 @@ class TemporalGraphDataset:
     def get_temporal_sequences(self):
         sequences = []
         labels = []
-        print("\n=== Raw Data Check ===")
-        for t in self.time_points[:5]:  # Check first 5 time points
-            all_values = []
+    
+        #print("\nAvailable time points:", self.time_points)
+        
+        # First, create a clean dictionary of gene expressions across time
+        gene_expressions = {}
+        for t in self.time_points:
+            # Convert time point to string for column access
+            time_col = f'Gene1_Time_{t}'
+            gene_expressions[t] = {}
+            
+            #print(f"\nProcessing time point {t}")  # Debug print
+            
             for gene in self.node_map.keys():
+                # Use the correct column name format
                 gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
                 gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
-                values = np.concatenate([gene1_expr, gene2_expr])
-                all_values.extend(values)
+                
+                # Take the first non-empty value
+                if len(gene1_expr) > 0:
+                    expr_value = gene1_expr[0]
+                elif len(gene2_expr) > 0:
+                    expr_value = gene2_expr[0]
+                else:
+                    print(f"Warning: No expression found for gene {gene} at time {t}")
+                    expr_value = 0.0
+                    
+                gene_expressions[t][gene] = expr_value
         
-            print(f"Time {t}:")
-            print(f"Range: [{min(all_values):.4f}, {max(all_values):.4f}]")
-            print(f"Changes from previous: {np.mean(np.diff(all_values)):.4f}")
+        # Debug print for verification
+        print("\nExpression value check:")
+        for t in self.time_points[:3]:  # First 3 time points
+            print(f"\nTime point {t}:")
+            for gene in list(self.node_map.keys())[:5]:  # First 5 genes
+                print(f"Gene {gene}: {gene_expressions[t][gene]}")
         
+        # Create sequences
         for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
-            seq_graphs = [self.get_pyg_graph(t) for t in self.time_points[i:i+self.seq_len]]
-            label_graphs = [self.get_pyg_graph(t) for t in 
-                          self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]]
-            
-            #print(f"Sequence graphs: {[g.x.shape for g in seq_graphs]}")
-            #print(f"Label graphs: {[g.x.shape for g in label_graphs]}")
-
-            #for graph in seq_graphs[:1]:  # Check only the first sequence graph
-            #    print(graph.edge_index)
-            
-            #print(f"Feature mean: {torch.cat([g.x for g in seq_graphs]).mean(dim=0)}")
-            #print(f"Feature std: {torch.cat([g.x for g in seq_graphs]).std(dim=0)}")
-            
-            #print(f"Label graphs (sample): {[g.x.shape for g in label_graphs[:3]]}")
-
-            #input_times = self.time_points[i:i+self.seq_len]
+            input_times = self.time_points[i:i+self.seq_len]
             target_times = self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]
             
-            if i == 0:
-                print("\nSequence information:")
-                print(f"Input time points: {self.time_points[i:i+self.seq_len]}")
-                print(f"Target time points: {self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]}")
-                print(f"Feature dimension: {seq_graphs[0].x.shape[1]}")
-
-                # debugging for gene values
-                #label_tensor = torch.stack([g.x for g in label_graphs]).mean(dim=0)
-                label_tensor = torch.stack([g.x for g in label_graphs]).squeeze(dim=0) # Instead of mean, I directly squeeze the dim
-                #print(f" Label tensor: {label_tensor}")
-                #print(f" Label tensor shape: {label_tensor.shape}") # [1, 52, 32] without mean(dim=0)--> with dim=0 [52, 32] 
-                genes = list(self.node_map.keys())
-                print("\nSample label values for first 5 genes:")
-                for idx in range(min(5, len(genes))):
-                    gene = genes[idx]
-                    value = label_tensor[idx]
-                    print(f"{gene}: {value.mean().item():.4f}")
-                
-                # Check raw expression values
-                #print("\nRaw expression values for first gene:")
-                #first_gene = genes[0]
-                #for t in target_times:
-                #    expr = self.df[self.df['Gene1_clean'] == first_gene][f'Gene1_Time_{t}'].values
-                #   if len(expr) == 0:
-                #        expr = self.df[self.df['Gene2_clean'] == first_gene][f'Gene2_Time_{t}'].values
-                #    print(f"Time {t}: {expr[0] if len(expr) > 0 else 'Not found'}")
+            print(f"\nSequence {i}:")
+            print(f"Input times: {input_times}")
+            print(f"Target times: {target_times}")
+            
+            # Create sequence graphs
+            seq_graphs = []
+            for t in input_times:
+                # The features should already be 32-dimensional from Node2Vec
+                features = torch.tensor([gene_expressions[t][gene] for gene in self.node_map.keys()], 
+                                    dtype=torch.float32)
+                graph = self.get_pyg_graph(t)
+                # Node2Vec features are already shape [num_nodes, 32]
+                #print(f"Graph features shape: {graph.x.shape}")  # Should be [52, 32]
+                seq_graphs.append(graph)
+            
+            # Create label graphs
+            label_graphs = []
+            for t in target_times:
+                graph = self.get_pyg_graph(t)
+                label_graphs.append(graph)
             
             sequences.append(seq_graphs)
             labels.append(label_graphs)
-            #print(f"Labels: {labels}")
         
-        print(f"\nCreated {len(sequences)} sequences")
-
         return sequences, labels
-    

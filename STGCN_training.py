@@ -24,32 +24,24 @@ from STGCN_losses import temporal_pattern_loss, change_magnitude_loss
     
 def process_batch(seq, label):
     """Process batch data for training."""
-    #print("\n=== Input Sequence Statistics ===")
-    x = torch.stack([g.x for g in seq])
-    #print(f"Input shape: {x.shape}")
-    #print(f"Input range: [{x.min():.4f}, {x.max():.4f}]")
-    #print(f"Input mean: {x.mean():.4f}")
-    x = x.permute(2, 0, 1).unsqueeze(0)  # [1, channels, time_steps, nodes]
+    #print("\nDebug shapes:")
+    # Stack sequence graphs with Node2Vec embeddings
+    x = torch.stack([g.x for g in seq])  # [seq_len, num_nodes, features(32)]
+    #print(f"Initial x shape: {x.shape}")  # Should be [3, 52, 32] correct
     
-    target = torch.stack([g.x for g in label])
-
-    target = target.permute(2, 0, 1).unsqueeze(0)  # [1, channels, time_steps, nodes]
+    # For target, we only have expression values
+    target = torch.stack([g.x for g in label])  # [pred_len, num_nodes]
+    #print(f"Initial target shape: {target.shape}")  # Should be [1, 52, 32] correct
     
-    # Take only the last time step of target
-    #target = target[:, :, -1:, :]  # [1, channels, 1, nodes] not take for temporal loss and relations!!!!!
-    #print(f"Input sequence shape: {x.shape}")
-    #print(f"Target shape: {target.shape}")
-
-    print("\n=== Batch Statistics ===")
-    print("Input sequence:")
-    for t in range(x.shape[0]):
-        changes = x[t] - x[t-1] if t > 0 else torch.zeros_like(x[0])
-        print(f"Time step {t}:")
-        print(f"Values range: [{x[t].min():.4f}, {x[t].max():.4f}]")
-        print(f"Changes range: [{changes.min():.4f}, {changes.max():.4f}]")
+    # Permute to [batch, features, time_steps, num_nodes]
+    x = x.permute(2, 0, 1).unsqueeze(0)  # [1, 32, seq_len, 52]
+    #print(f"After permute x shape: {x.shape}")
+    target = target.permute(2, 0, 1).unsqueeze(0)  # [1, 1, 1, 52]
+    #print(f"After permute target shape: {target.shape}")
     
-    print("\nTarget:")
-    print(f"Range: [{target.min():.4f}, {target.max():.4f}]")
+    #print(f"Final x shape: {x.shape}") # Final x shape: torch.Size([1, 32, 3, 52])
+    #print(f"Final target shape: {target.shape}") # Final target shape: torch.Size([1, 32, 1, 52])
+    
     return x, target
 
 def calculate_correlation(tensor):
@@ -64,10 +56,10 @@ def train_stgcn(dataset, val_ratio=0.2):
     args = Args()
     args.n_vertex = dataset.num_nodes
 
-    print(f"\nModel Configuration:")
-    print(f"Number of nodes: {args.n_vertex}")
-    print(f"Historical sequence length: {args.n_his}")
-    print(f"Block structure: {args.blocks}")
+    #print(f"\nModel Configuration:")
+    #print(f"Number of nodes: {args.n_vertex}")
+    #print(f"Historical sequence length: {args.n_his}")
+    #print(f"Block structure: {args.blocks}")
 
     # sequences with labels
     sequences, labels = dataset.get_temporal_sequences()
@@ -115,7 +107,7 @@ def train_stgcn(dataset, val_ratio=0.2):
     model = model.float() # convert model to float otherwise I am getting type error
 
     optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)
-    #criterion = nn.MSELoss()
+    criterion = nn.MSELoss()
 
     num_epochs = 100
     best_val_loss = float('inf')
@@ -149,7 +141,7 @@ def train_stgcn(dataset, val_ratio=0.2):
 
             # Don't take the last point for temporal loss !!!!!!
             #target = target[:, :, -1:, :]  # Keep only the last timestep
-            #output = output[:, :, -1:, :]
+            output = output[:, :, -1:, :]
 
             batch_stats.append({
                 'target_range': [target.min().item(), target.max().item()],
@@ -160,7 +152,8 @@ def train_stgcn(dataset, val_ratio=0.2):
 
             all_targets.append(target.detach().cpu().numpy())
             all_outputs.append(output.detach().cpu().numpy())
-            loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
+            #loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
+            loss = criterion(output, target)
 
             loss.backward()
             optimizer.step()
@@ -190,12 +183,13 @@ def train_stgcn(dataset, val_ratio=0.2):
 
                 # Don't take the last point for temporal loss!!!
                 #target = target[:, :, -1:, :]  
-                #output = output[:, :, -1:, :]
+                output = output[:, :, -1:, :]
 
                 #print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
                 #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
-                val_loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
+                #val_loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
+                val_loss = criterion(output, target)
                 val_loss_total += val_loss.item()
 
                 output_corr = calculate_correlation(output)
@@ -217,7 +211,7 @@ def train_stgcn(dataset, val_ratio=0.2):
         print(f'Epoch {epoch+1}/{num_epochs}')
         print(f'Training Loss: {avg_train_loss:.4f}')
         print(f'Validation Loss: {avg_val_loss:.4f}')
-        print(f'Interaction Loss: {avg_interaction_loss:.4f}\n')
+        #print(f'Interaction Loss: {avg_interaction_loss:.4f}\n')
         
         # Early stopping
         if avg_val_loss < best_val_loss:
@@ -289,9 +283,9 @@ def analyze_temporal_patterns(model, val_sequences, val_labels, dataset, save_di
 
         plt.figure(figsize=(15,10))
         genes = list(dataset.node_map.keys())
-        num_genes_to_plot = min(6, len(genes))
+        #num_genes_to_plot = min(6, len(genes))
 
-        for i in range(num_genes_to_plot):
+        for i in range(len(genes)):
             plt.subplot(3,2, i+1)
             gene_idx = dataset.node_map[genes[i]]
             # Plot actual vs predicted values over time
@@ -304,7 +298,9 @@ def analyze_temporal_patterns(model, val_sequences, val_labels, dataset, save_di
             plt.legend()
 
             actual = targets[:, 0, 0, gene_idx]
+            print(f"Actual: {actual}")
             pred = predictions[:, 0, 0, gene_idx]
+            print(f"Pred: {pred}")
 
             # Calculate rate of change
             actual_changes = np.diff(actual)
@@ -753,7 +749,7 @@ if __name__ == "__main__":
     dataset = TemporalGraphDataset(
         csv_file='mapped/enhanced_interactions.csv',
         embedding_dim=32,
-        seq_len=5,
+        seq_len=3,
         pred_len=1
     )
     
