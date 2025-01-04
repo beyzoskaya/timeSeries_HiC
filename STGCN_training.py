@@ -23,18 +23,18 @@ from create_graph_and_embeddings_STGCN import *
     
 def process_batch(seq, label):
     """Process batch data for training."""
-    print("\n=== Input Sequence Statistics ===")
+    #print("\n=== Input Sequence Statistics ===")
     x = torch.stack([g.x for g in seq])
-    print(f"Input shape: {x.shape}")
-    print(f"Input range: [{x.min():.4f}, {x.max():.4f}]")
-    print(f"Input mean: {x.mean():.4f}")
+    #print(f"Input shape: {x.shape}")
+    #print(f"Input range: [{x.min():.4f}, {x.max():.4f}]")
+    #print(f"Input mean: {x.mean():.4f}")
     x = x.permute(2, 0, 1).unsqueeze(0)  # [1, channels, time_steps, nodes]
     
-    print("\n=== Target Statistics ===")
+    #print("\n=== Target Statistics ===")
     target = torch.stack([g.x for g in label])
-    print(f"Target shape: {target.shape}")
-    print(f"Target range: [{target.min():.4f}, {target.max():.4f}]")
-    print(f"Target mean: {target.mean():.4f}")
+    #print(f"Target shape: {target.shape}")
+    #print(f"Target range: [{target.min():.4f}, {target.max():.4f}]")
+    #print(f"Target mean: {target.mean():.4f}")
 
     target = target.permute(2, 0, 1).unsqueeze(0)  # [1, channels, time_steps, nodes]
     
@@ -125,7 +125,7 @@ def train_stgcn(dataset, val_ratio=0.2):
         batch_stats = []
         all_targets = []
         all_outputs = []
-        
+
         for seq,label in zip(train_sequences, train_labels):
             optimizer.zero_grad()
             x,target = process_batch(seq, label)
@@ -154,15 +154,15 @@ def train_stgcn(dataset, val_ratio=0.2):
             optimizer.step()
             total_loss += loss.item()
 
-        if epoch % 5 == 0:
-            targets = np.concatenate(all_targets)
-            outputs = np.concatenate(all_outputs)
-            print(f"\nEpoch {epoch} Detailed Statistics:")
-            print(f"Target range: [{targets.min():.4f}, {targets.max():.4f}]")
-            print(f"Target mean: {targets.mean():.4f}")
-            print(f"Output range: [{outputs.min():.4f}, {outputs.max():.4f}]")
-            print(f"Output mean: {outputs.mean():.4f}")
-            print(f"Loss: {total_loss/len(train_sequences):.4f}")
+        #if epoch % 5 == 0:
+        #    targets = np.concatenate(all_targets)
+        #    outputs = np.concatenate(all_outputs)
+        #    print(f"\nEpoch {epoch} Detailed Statistics:")
+        #    print(f"Target range: [{targets.min():.4f}, {targets.max():.4f}]")
+        #    print(f"Target mean: {targets.mean():.4f}")
+        #    print(f"Output range: [{outputs.min():.4f}, {outputs.max():.4f}]")
+        #    print(f"Output mean: {outputs.mean():.4f}")
+        #    print(f"Loss: {total_loss/len(train_sequences):.4f}")
 
         model.eval()
         val_loss = 0
@@ -248,6 +248,93 @@ def train_stgcn(dataset, val_ratio=0.2):
     plt.close()
     
     return model, val_sequences, val_labels, train_losses, val_losses  
+
+def analyze_temporal_patterns(model, val_sequences, val_labels, dataset, save_dir = 'temporal_analysis'):
+    os.makedirs(save_dir, exist_ok=True)
+    model.eval()
+
+    print("\n=== Temporal Pattern Analysis ===")
+    with torch.no_grad():
+        predictions_over_time = []
+        targets_over_time = []
+
+        for seq,label in zip(val_sequences, val_labels):
+            x, target = process_batch(seq, label)
+            output = model(x)
+
+            # Take only the last timestep
+            target = target[:, :, -1:, :].cpu().numpy()
+            output = output[:, :, -1:, :].cpu().numpy()
+
+            predictions_over_time.append(output)
+            targets_over_time.append(target)
+
+        predictions = np.concatenate(predictions_over_time, axis=0)
+        targets = np.concatenate(targets_over_time, axis=0)
+
+        plt.figure(figsize=(15,10))
+        genes = list(dataset.node_map.keys())
+        num_genes_to_plot = min(6, len(genes))
+
+        for i in range(num_genes_to_plot):
+            plt.subplot(3,2, i+1)
+            gene_idx = dataset.node_map[genes[i]]
+            # Plot actual vs predicted values over time
+            plt.plot(targets[:, 0, 0, gene_idx], 'b-', label='Actual', alpha=0.7)
+            plt.plot(predictions[:, 0, 0, gene_idx], 'r--', label='Predicted', alpha=0.7)
+            
+            plt.title(f'Gene: {genes[i]}')
+            plt.xlabel('Time Steps')
+            plt.ylabel('Expression Level')
+            plt.legend()
+
+            actual = targets[:, 0, 0, gene_idx]
+            pred = predictions[:, 0, 0, gene_idx]
+
+            # Calculate rate of change
+            actual_changes = np.diff(actual)
+            pred_changes = np.diff(pred)
+            # Direction accuracy
+            direction_accuracy = np.mean(np.sign(actual_changes) == np.sign(pred_changes))
+            
+            print(f"\nTemporal Analysis for {genes[i]}:")
+            print(f"Direction Accuracy: {direction_accuracy:.4f}")
+            print(f"Max Change (Actual): {np.max(np.abs(actual_changes)):.4f}")
+            print(f"Max Change (Predicted): {np.max(np.abs(pred_changes)):.4f}")
+            
+            # Check for pattern repetition
+            actual_autocorr = np.correlate(actual, actual, mode='full')
+            pred_autocorr = np.correlate(pred, pred, mode='full')
+            
+            print(f"Pattern Periodicity Match: {np.corrcoef(actual_autocorr, pred_autocorr)[0,1]:.4f}")
+        
+        plt.tight_layout()
+        plt.savefig(f'{save_dir}/temporal_patterns.png')
+        plt.close()
+
+        print("\n=== Overall Temporal Statistics ===")
+        
+        # Rate of change distribution
+        plt.figure(figsize=(12, 4))
+        
+        plt.subplot(1, 2, 1)
+        plt.hist(np.diff(targets).flatten(), bins=50, alpha=0.5, label='Actual')
+        plt.hist(np.diff(predictions).flatten(), bins=50, alpha=0.5, label='Predicted')
+        plt.title('Distribution of Expression Changes')
+        plt.xlabel('Change in Expression')
+        plt.ylabel('Frequency')
+        plt.legend()
+
+        plt.subplot(1, 2, 2)
+        plt.scatter(np.diff(targets).flatten(), np.diff(predictions).flatten(), alpha=0.1)
+        plt.xlabel('Actual Changes')
+        plt.ylabel('Predicted Changes')
+        plt.title('Change Prediction Accuracy')
+        
+        plt.tight_layout()
+        plt.savefig(f'{save_dir}/temporal_changes.png')
+        plt.close()
+
 
 def analyze_interactions(model, val_sequences, val_labels, dataset):
     """Analyzes the preservation of gene-gene interactions."""
@@ -677,6 +764,8 @@ if __name__ == "__main__":
     save_dir='plottings_STGCN'
     )
 
+    analyze_temporal_patterns(model, val_sequences, val_labels, dataset)
+    
     print("\nModel Performance Summary:")
     print(f"Overall Metrics:")
     print(f"Pearson Correlation: {metrics['Overall']['Pearson_Correlation']:.4f}")
