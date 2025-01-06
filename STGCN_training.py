@@ -365,6 +365,46 @@ def calculate_temporal_metrics(predictions, targets, dataset):
     
     return metrics
 
+def create_gene_temporal_plots(predictions, targets, dataset, save_dir):
+    """Create temporal pattern plots for all genes across multiple pages."""
+    genes = list(dataset.node_map.keys())
+    genes_per_page = 15  # Show 15 genes per page (5x3 grid)
+    num_genes = len(genes)
+    num_pages = (num_genes + genes_per_page - 1) // genes_per_page
+    
+    for page in range(num_pages):
+        plt.figure(figsize=(20, 15))
+        start_idx = page * genes_per_page
+        end_idx = min((page + 1) * genes_per_page, num_genes)
+        current_genes = genes[start_idx:end_idx]
+        
+        for i, gene in enumerate(current_genes):
+            plt.subplot(5, 3, i+1)
+            gene_idx = dataset.node_map[gene]
+            
+            # Plot actual and predicted values
+            plt.plot(targets[:, gene_idx], 'b-', label='Actual', marker='o')
+            plt.plot(predictions[:, gene_idx], 'r--', label='Predicted', marker='s')
+            
+            # Calculate metrics for this gene
+            corr, _ = pearsonr(targets[:, gene_idx], predictions[:, gene_idx])
+            rmse = np.sqrt(mean_squared_error(targets[:, gene_idx], predictions[:, gene_idx]))
+            
+            # Calculate changes
+            actual_changes = np.diff(targets[:, gene_idx])
+            pred_changes = np.diff(predictions[:, gene_idx])
+            direction_acc = np.mean(np.sign(actual_changes) == np.sign(pred_changes))
+            
+            plt.title(f'Gene: {gene}\nCorr: {corr:.3f}, RMSE: {rmse:.3f}\nDir Acc: {direction_acc:.3f}')
+            plt.xlabel('Time Step')
+            plt.ylabel('Expression')
+            if i == 0:  # Only show legend for first plot
+                plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(f'{save_dir}/temporal_patterns_page_{page+1}.png')
+        plt.close()
+
 def create_evaluation_plots(predictions, targets, dataset, save_dir):
     """Create comprehensive evaluation plots."""
     # 1. Overall prediction scatter
@@ -391,24 +431,8 @@ def create_evaluation_plots(predictions, targets, dataset, save_dir):
     plt.savefig(f'{save_dir}/change_distribution.png')
     plt.close()
     
-    # 3. Gene temporal patterns
-    genes = list(dataset.node_map.keys())
-    plt.figure(figsize=(15, 10))
-    
-    for i in range(min(6, len(genes))):
-        plt.subplot(2, 3, i+1)
-        gene_idx = dataset.node_map[genes[i]]
-        
-        plt.plot(targets[:, gene_idx], label='Actual', marker='o')
-        plt.plot(predictions[:, gene_idx], label='Predicted', marker='s')
-        plt.title(f'Gene: {genes[i]}')
-        plt.xlabel('Time Step')
-        plt.ylabel('Expression')
-        plt.legend()
-    
-    plt.tight_layout()
-    plt.savefig(f'{save_dir}/temporal_patterns.png')
-    plt.close()
+    # 3. Gene temporal patterns for all genes
+    create_gene_temporal_plots(predictions, targets, dataset, save_dir)
     
 class Args:
     def __init__(self):
@@ -437,27 +461,6 @@ if __name__ == "__main__":
     
     model, val_sequences,val_labels, train_losses, val_losses = train_stgcn(dataset, val_ratio=0.2)
     
-    plt.figure(figsize=(10, 6))
-    plt.plot(train_losses, label='Training Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('STGCN Training Progress')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig('plottings_STGCN/stgcn_training_progress.png')
-    plt.close()
-
-    # After training
-    metrics = evaluate_model_performance(
-    model, 
-    val_sequences, 
-    val_labels, 
-    dataset,
-    save_dir='plottings_STGCN'
-    )
-
-
     metrics = evaluate_model_performance(model, val_sequences, val_labels, dataset)
 
     print("\nModel Performance Summary:")
