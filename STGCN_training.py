@@ -21,6 +21,7 @@ import argparse
 from scipy.spatial.distance import cdist
 from create_graph_and_embeddings_STGCN import *
 from STGCN_losses import temporal_pattern_loss, change_magnitude_loss
+from evaluation import *
     
 def process_batch(seq, label):
     """Process batch data for training."""
@@ -248,462 +249,166 @@ def train_stgcn(dataset, val_ratio=0.2):
     
     return model, val_sequences, val_labels, train_losses, val_losses  
 
-def analyze_temporal_patterns(model, val_sequences, val_labels, dataset, save_dir = 'temporal_analysis'):
+def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCN'):
+
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
-
-    print("\n=== Temporal Pattern Analysis ===")
-    with torch.no_grad():
-        predictions_over_time = []
-        targets_over_time = []
-
-        for seq,label in zip(val_sequences, val_labels):
-            x, target = process_batch(seq, label)
-            output = model(x)
-
-            # Take only the last timestep
-            target = target[:, :, -1:, :].cpu().numpy()
-            output = output[:, :, -1:, :].cpu().numpy()
-
-            predictions_over_time.append(output)
-            targets_over_time.append(target)
-
-        predictions = np.concatenate(predictions_over_time, axis=0)
-        targets = np.concatenate(targets_over_time, axis=0)
-
-        plt.figure(figsize=(15,10))
-        genes = list(dataset.node_map.keys())
-        num_genes_to_plot = min(6, len(genes))
-
-        for i in range(num_genes_to_plot):
-            plt.subplot(3,2, i+1)
-            gene_idx = dataset.node_map[genes[i]]
-            # Plot actual vs predicted values over time
-            plt.plot(targets[:, 0, 0, gene_idx], 'b-', label='Actual', alpha=0.7)
-            plt.plot(predictions[:, 0, 0, gene_idx], 'r--', label='Predicted', alpha=0.7)
-            
-            plt.title(f'Gene: {genes[i]}')
-            plt.xlabel('Time Steps')
-            plt.ylabel('Expression Level')
-            plt.legend()
-
-            actual = targets[:, 0, 0, gene_idx]
-            print(f"Actual: {actual}")
-            pred = predictions[:, 0, 0, gene_idx]
-            print(f"Pred: {pred}")
-
-            # Calculate rate of change
-            actual_changes = np.diff(actual)
-            pred_changes = np.diff(pred)
-            # Direction accuracy
-            direction_accuracy = np.mean(np.sign(actual_changes) == np.sign(pred_changes))
-            
-            print(f"\nTemporal Analysis for {genes[i]}:")
-            print(f"Direction Accuracy: {direction_accuracy:.4f}")
-            print(f"Max Change (Actual): {np.max(np.abs(actual_changes)):.4f}")
-            print(f"Max Change (Predicted): {np.max(np.abs(pred_changes)):.4f}")
-            
-            # Check for pattern repetition
-            actual_autocorr = np.correlate(actual, actual, mode='full')
-            pred_autocorr = np.correlate(pred, pred, mode='full')
-            
-            print(f"Pattern Periodicity Match: {np.corrcoef(actual_autocorr, pred_autocorr)[0,1]:.4f}")
-        
-        plt.tight_layout()
-        plt.savefig(f'{save_dir}/temporal_patterns.png')
-        plt.close()
-
-        print("\n=== Overall Temporal Statistics ===")
-        
-        # Rate of change distribution
-        plt.figure(figsize=(12, 4))
-        
-        plt.subplot(1, 2, 1)
-        plt.hist(np.diff(targets).flatten(), bins=50, alpha=0.5, label='Actual')
-        plt.hist(np.diff(predictions).flatten(), bins=50, alpha=0.5, label='Predicted')
-        plt.title('Distribution of Expression Changes')
-        plt.xlabel('Change in Expression')
-        plt.ylabel('Frequency')
-        plt.legend()
-
-        plt.subplot(1, 2, 2)
-        plt.scatter(np.diff(targets).flatten(), np.diff(predictions).flatten(), alpha=0.1)
-        plt.xlabel('Actual Changes')
-        plt.ylabel('Predicted Changes')
-        plt.title('Change Prediction Accuracy')
-        
-        plt.tight_layout()
-        plt.savefig(f'{save_dir}/temporal_changes.png')
-        plt.close()
-
-
-def analyze_interactions(model, val_sequences, val_labels, dataset):
-    """Analyzes the preservation of gene-gene interactions."""
-    model.eval()
-    all_predicted = []
-    all_true = []
-    
-    with torch.no_grad():
-        for seq, label in zip(val_sequences, val_labels):
-            x, target = process_batch(seq, label)  # Shape: [1, 32, seq_len, 52]
-            output = model(x)  # Shape: [1, 32, seq_len, 52]
-            
-            # Extract predicted interactions (correlation between genes)
-            predicted_corr = calculate_correlation(output)  # [channels, channels]
-            true_corr = calculate_correlation(target)  # [channels, channels]
-            
-            # Collect results for interaction loss
-            all_predicted.append(predicted_corr.cpu().numpy())
-            all_true.append(true_corr.cpu().numpy())
-    
-    predicted_interactions = np.concatenate(all_predicted, axis=0)
-    true_interactions = np.concatenate(all_true, axis=0)
-    
-    interaction_loss = np.mean((predicted_interactions - true_interactions) ** 2)
-    
-    print(f"Interaction Preservation (MSE between predicted and true interaction matrix): {interaction_loss:.4f}")
-    
-    return interaction_loss
-
-def analyze_gene(model, val_sequences, val_labels, dataset):
-    """Analyzes the gene prediction performance over time for validation sequences."""
-    model.eval()
-    all_predicted = []
-    all_true = []
-    
-    with torch.no_grad():
-        for seq, label in zip(val_sequences, val_labels):
-            x, target = process_batch(seq, label)  # Shape: [1, 32, seq_len, 52]
-            output = model(x)  # Shape: [1, 32, seq_len, 52]
-            
-            # remove the batch dimension, keeping seq_len and gene dimensions
-            all_predicted.append(output.squeeze(0).cpu().numpy())  # Shape: [seq_len, genes]
-            all_true.append(target.squeeze(0).cpu().numpy())  # Shape: [seq_len, genes]
-    
-    all_predicted = np.concatenate(all_predicted, axis=0)  # Shape: [total_time_steps, genes]
-    all_true = np.concatenate(all_true, axis=0)  # Shape: [total_time_steps, genes]
-
-    if all_predicted.shape[1] != all_true.shape[1]:
-        # Align shapes by duplicating the true labels across all predicted genes
-        if all_true.shape[1] == 1 and all_predicted.shape[1] > 1:
-            all_true = np.repeat(all_true, all_predicted.shape[1], axis=1) 
-        else:
-            raise ValueError(f"Predicted and true arrays have different gene dimensions: "
-                             f"{all_predicted.shape[1]} vs {all_true.shape[1]}")
-    
-    gene_corrs = []
-    num_genes = all_true.shape[1]  
-    
-    for gene_idx in range(num_genes):  # Iterate over genes
-        # Flatten the arrays to 1D
-        pred_gene = all_predicted[:, gene_idx].flatten()  # Flatten to 1D
-        true_gene = all_true[:, gene_idx].flatten()  # Flatten to 1D
-        
-        corr, _ = pearsonr(pred_gene, true_gene)
-        gene_corrs.append(corr)
-    
-    mean_corr = np.mean(gene_corrs)
-    
-    print(f"Mean Pearson Correlation between predicted and true gene expressions: {mean_corr:.4f}")
-    
-    return mean_corr
-
-def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir):
-    os.makedirs(save_dir, exist_ok=True)
-    model.eval()
-    metrics = {
-        'Overall': {},
-        'Gene_Performance': {},
-        'Temporal_Stability': {}
-    }
     
     all_predictions = []
     all_targets = []
     
     with torch.no_grad():
         for seq, label in zip(val_sequences, val_labels):
-            x, target = process_batch(seq, label)  # Now returns expression values for target
-            output = model(x)  # Output is now [batch, 1, time_steps, nodes]
+            # Get input and target
+            x, target = process_batch(seq, label)
+            output = model(x)
             
-            # Already single channel, just take last time step
-            output = output[:, 0, -1:, :]  # Shape: [1, 1, nodes]
-            target = target[:, 0, :, :]    # Shape: [1, 1, nodes]
+            # Extract only the expression predictions
+            output = output[:, :, -1:, :].squeeze().cpu().numpy()  # [nodes] expression values
+            target = target.squeeze().cpu().numpy()  # [nodes] expression values
             
-            # Reshape for evaluation
-            pred = output.squeeze().cpu().numpy()  # Shape: [nodes]
-            true = target.squeeze().cpu().numpy()  # Shape: [nodes]
-            
-            all_predictions.append(pred)
-            all_targets.append(true)
+            all_predictions.append(output)
+            all_targets.append(target)
+    
+    # Convert to numpy arrays
+    predictions = np.array(all_predictions)  # [time_points, nodes]
+    targets = np.array(all_targets)      # [time_points, nodes]
+    
+    # Calculate metrics
+    overall_metrics = calculate_overall_metrics(predictions, targets)
+    gene_metrics = calculate_gene_metrics(predictions, targets, dataset)
+    temporal_metrics = calculate_temporal_metrics(predictions, targets, dataset)
+    
+    # Create visualizations
+    create_evaluation_plots(predictions, targets, dataset, save_dir)
+    
+    metrics = {
+        'Overall': overall_metrics,
+        'Gene': gene_metrics,
+        'Temporal': temporal_metrics
+    }
+    
+    return metrics
 
 def calculate_overall_metrics(predictions, targets):
-    """Calculate overall model performance metrics."""
+    """Calculate overall expression prediction metrics."""
     metrics = {}
     
-    # Reshape arrays for overall metrics
-    pred_flat = predictions.reshape(-1)
-    target_flat = targets.reshape(-1)
+    # Flatten for overall metrics
+    pred_flat = predictions.flatten()
+    target_flat = targets.flatten()
     
-    # Basic regression metrics
+    # Calculate basic metrics
     metrics['MSE'] = mean_squared_error(target_flat, pred_flat)
     metrics['RMSE'] = np.sqrt(metrics['MSE'])
     metrics['MAE'] = mean_absolute_error(target_flat, pred_flat)
     metrics['R2_Score'] = r2_score(target_flat, pred_flat)
-    
-    # Overall correlation
     metrics['Pearson_Correlation'], _ = pearsonr(target_flat, pred_flat)
     
     return metrics
 
-def calculate_gene_metrics(predictions, targets, node_map, save_dir):
-    """Calculate gene-wise performance metrics."""
+def calculate_gene_metrics(predictions, targets, dataset):
+    """Calculate gene-specific metrics."""
     metrics = {}
+    genes = list(dataset.node_map.keys())
+    
+    # Per-gene correlations
     gene_correlations = []
     gene_rmse = []
-    save_dir='plottings_STGCN'
     
-    num_genes = predictions.shape[-1]
-    genes = list(node_map.keys())
-    
-    for gene_idx in range(num_genes):
-        pred_gene = predictions[..., gene_idx].flatten()
-        true_gene = targets[..., gene_idx].flatten()
+    for gene_idx, gene in enumerate(genes):
+        pred_gene = predictions[:, gene_idx]  # All timepoints for this gene
+        true_gene = targets[:, gene_idx]
         
-        # Handle NaN values
-        mask = ~(np.isnan(pred_gene) | np.isnan(true_gene))
-        pred_gene = pred_gene[mask]
-        true_gene = true_gene[mask]
+        corr, _ = pearsonr(pred_gene, true_gene)
+        rmse = np.sqrt(mean_squared_error(true_gene, pred_gene))
         
-        if len(pred_gene) > 0:
-            corr, _ = pearsonr(pred_gene, true_gene)
-            rmse = np.sqrt(mean_squared_error(true_gene, pred_gene))
-        else:
-            corr = np.nan
-            rmse = np.nan
-        
-        gene_correlations.append(corr)
+        gene_correlations.append((gene, corr))
         gene_rmse.append(rmse)
     
-    # Filter out NaN values for sorting
-    valid_performances = [(gene, corr) for gene, corr in zip(genes, gene_correlations) 
-                         if not np.isnan(corr)]
-    valid_performances.sort(key=lambda x: x[1], reverse=True)
+    # Sort genes by correlation
+    gene_correlations.sort(key=lambda x: x[1], reverse=True)
     
-    metrics['Mean_Correlation'] = np.nanmean(gene_correlations)
-    metrics['Mean_RMSE'] = np.nanmean(gene_rmse)
-    metrics['Best_Genes'] = [gene for gene, _ in valid_performances[:5]]
-    metrics['Worst_Genes'] = [gene for gene, _ in valid_performances[-5:]]
-    
-    # Create gene performance visualization
-    valid_correlations = [c for c in gene_correlations if not np.isnan(c)]
-    valid_rmse = [r for r in gene_rmse if not np.isnan(r)]
-    
-    plt.figure(figsize=(12, 8))
-    plt.scatter(valid_correlations, valid_rmse, alpha=0.5)
-    plt.xlabel('Correlation')
-    plt.ylabel('RMSE')
-    plt.title('Gene Performance Distribution')
-    plt.show()
-    plt.savefig(f'{save_dir}/gene_performance_distribution.png')
-    plt.close()
+    metrics['Mean_Correlation'] = np.mean([corr for _, corr in gene_correlations])
+    metrics['Best_Genes'] = [gene for gene, _ in gene_correlations[:5]]
+    metrics['Gene_RMSE'] = {gene: rmse for gene, rmse in zip(genes, gene_rmse)}
     
     return metrics
 
-def calculate_temporal_metrics(true_values, predicted_values):
-
+def calculate_temporal_metrics(predictions, targets, dataset):
+    """Calculate temporal prediction metrics."""
     metrics = {}
     
-    # 1. Dynamic Time Warping (DTW) distance
-    dtw_distances = []
-    for i in range(true_values.shape[1]):
-        true_seq = true_values[:, i].reshape(-1, 1)
-        pred_seq = predicted_values[:, i].reshape(-1, 1)
-        D = cdist(true_seq, pred_seq)
-        dtw_distances.append(D.sum())
-    metrics['dtw_mean'] = np.mean(dtw_distances)
+    # Calculate changes between consecutive timepoints
+    true_changes = np.diff(targets, axis=0)  # [time-1, nodes]
+    pred_changes = np.diff(predictions, axis=0)
     
-    # 2. Temporal Correlation (considers lag relationships)
-    def temporal_corr(y_true, y_pred, max_lag=3):
-        correlations = []
-        for lag in range(max_lag + 1):
-            if lag == 0:
-                corr = np.corrcoef(y_true, y_pred)[0, 1]
-                #print(f"I'm inside lag=0")
-            else:
-                corr = np.corrcoef(y_true[lag:], y_pred[:-lag])[0, 1]
-            correlations.append(corr)
-        return np.max(correlations)  # Return max correlation across lags
+    # Direction accuracy (whether changes are in the same direction)
+    direction_match = np.sign(true_changes) == np.sign(pred_changes)
+    metrics['Direction_Accuracy'] = np.mean(direction_match)
     
-    temp_corrs = []
-    for i in range(true_values.shape[1]):
-        temp_corr = temporal_corr(true_values[:, i], predicted_values[:, i])
-        temp_corrs.append(temp_corr)
-    metrics['temporal_correlation'] = np.mean(temp_corrs)
+    # Magnitude of changes
+    metrics['Mean_True_Change'] = np.mean(np.abs(true_changes))
+    metrics['Mean_Pred_Change'] = np.mean(np.abs(pred_changes))
     
-    # 3. Trend Consistency (direction of changes)
-    def trend_accuracy(y_true, y_pred):
-        true_diff = np.diff(y_true)
-        pred_diff = np.diff(y_pred)
-        true_direction = np.sign(true_diff)
-        pred_direction = np.sign(pred_diff)
-        return np.mean(true_direction == pred_direction)
+    # Temporal correlation per gene
+    genes = list(dataset.node_map.keys())
+    temporal_corrs = []
     
-    trend_accs = []
-    for i in range(true_values.shape[1]):
-        trend_acc = trend_accuracy(true_values[:, i], predicted_values[:, i])
-        trend_accs.append(trend_acc)
-    metrics['trend_accuracy'] = np.mean(trend_accs)
+    for gene_idx, gene in enumerate(genes):
+        true_seq = targets[:, gene_idx]
+        pred_seq = predictions[:, gene_idx]
+        corr, _ = pearsonr(true_seq, pred_seq)
+        temporal_corrs.append(corr)
     
-    # 4. RMSE over time
-    time_rmse = []
-    for t in range(true_values.shape[0]):
-        rmse = np.sqrt(np.mean((true_values[t] - predicted_values[t])**2))
-        time_rmse.append(rmse)
-    metrics['rmse_over_time'] = np.mean(time_rmse)
-    metrics['rmse_std'] = np.std(time_rmse)
-    
-    # 5. Temporal Pattern Similarity
-    def pattern_similarity(y_true, y_pred):
-        # Normalize sequences
-        y_true_norm = y_true
-        y_pred_norm = y_pred
-        # Calculate similarity
-        return np.mean(np.abs(y_true_norm - y_pred_norm))
-    
-    pattern_sims = []
-    for i in range(true_values.shape[1]):
-        sim = pattern_similarity(true_values[:, i], predicted_values[:, i])
-        pattern_sims.append(sim)
-    metrics['pattern_similarity'] = np.mean(pattern_sims)
+    metrics['Mean_Temporal_Correlation'] = np.mean(temporal_corrs)
     
     return metrics
 
 def create_evaluation_plots(predictions, targets, dataset, save_dir):
-    """Create comprehensive evaluation visualizations."""
-    save_dir='plottings_STGCN'
-
-    # 1. Overall prediction scatter plot
-    plt.figure(figsize=(10, 10))
-    pred_flat = predictions.flatten()
-    target_flat = targets.flatten()
-    mask = ~(np.isnan(pred_flat) | np.isnan(target_flat))
-    plt.scatter(target_flat[mask], pred_flat[mask], alpha=0.1)
-    plt.plot([min(target_flat[mask]), max(target_flat[mask])], 
-             [min(target_flat[mask]), max(target_flat[mask])], 'r--')
-    plt.xlabel('True Expression Values')
-    plt.ylabel('Predicted Expression Values')
+    """Create comprehensive evaluation plots."""
+    # 1. Overall prediction scatter
+    plt.figure(figsize=(10, 8))
+    plt.scatter(targets.flatten(), predictions.flatten(), alpha=0.1)
+    plt.plot([targets.min(), targets.max()], [targets.min(), targets.max()], 'r--')
+    plt.xlabel('True Expression')
+    plt.ylabel('Predicted Expression')
     plt.title('Expression Prediction Performance')
-    plt.savefig(f'{save_dir}/expression_scatter.png')
+    plt.savefig(f'{save_dir}/overall_scatter.png')
     plt.close()
     
-    # 2. Temporal predictions for genes
-    genes = list(dataset.node_map.keys())
-    plt.figure(figsize=(15, 15))
+    # 2. Change distribution plot
+    true_changes = np.diff(targets, axis=0).flatten()
+    pred_changes = np.diff(predictions, axis=0).flatten()
     
-    # Plot actual changes vs predicted changes
-    plt.subplot(2, 1, 1)
-    actual_changes = np.diff(targets, axis=0)
-    pred_changes = np.diff(predictions, axis=0)
-    plt.hist(actual_changes.flatten(), bins=50, alpha=0.5, label='Actual Changes')
-    plt.hist(pred_changes.flatten(), bins=50, alpha=0.5, label='Predicted Changes')
+    plt.figure(figsize=(12, 6))
+    plt.hist(true_changes, bins=50, alpha=0.5, label='Actual Changes')
+    plt.hist(pred_changes, bins=50, alpha=0.5, label='Predicted Changes')
     plt.xlabel('Expression Change')
     plt.ylabel('Frequency')
     plt.title('Distribution of Expression Changes')
     plt.legend()
+    plt.savefig(f'{save_dir}/change_distribution.png')
+    plt.close()
     
-    # Plot temporal patterns
-    plt.subplot(2, 1, 2)
-    for i in range(min(5, len(genes))):
+    # 3. Gene temporal patterns
+    genes = list(dataset.node_map.keys())
+    plt.figure(figsize=(15, 10))
+    
+    for i in range(min(6, len(genes))):
+        plt.subplot(2, 3, i+1)
         gene_idx = dataset.node_map[genes[i]]
-        plt.plot(targets[:, gene_idx], '--', label=f'{genes[i]} (True)', alpha=0.7)
-        plt.plot(predictions[:, gene_idx], '-', label=f'{genes[i]} (Pred)', alpha=0.7)
-    plt.xlabel('Time Step')
-    plt.ylabel('Expression Value')
-    plt.title('Temporal Expression Patterns')
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        
+        plt.plot(targets[:, gene_idx], label='Actual', marker='o')
+        plt.plot(predictions[:, gene_idx], label='Predicted', marker='s')
+        plt.title(f'Gene: {genes[i]}')
+        plt.xlabel('Time Step')
+        plt.ylabel('Expression')
+        plt.legend()
+    
     plt.tight_layout()
     plt.savefig(f'{save_dir}/temporal_patterns.png')
     plt.close()
-
-def process_batch_evaluation(seq, label):
-    """Process batch data for evaluation."""
-    x = torch.stack([g.x for g in seq])
-    x = x.permute(2, 0, 1).unsqueeze(0)
-    
-    target = torch.stack([g.x for g in label])
-    target = target.permute(2, 0, 1).unsqueeze(0)
-    
-    return x, target
-
-def analyze_prediction_changes(predictions, targets, dataset):
-    """Analyze how well the model predicts changes in expression."""
-    actual_changes = np.diff(targets, axis=0)
-    pred_changes = np.diff(predictions, axis=0)
-    
-    # Calculate direction accuracy
-    direction_accuracy = np.mean(np.sign(actual_changes) == np.sign(pred_changes))
-    
-    # Calculate magnitude accuracy
-    magnitude_ratio = np.abs(pred_changes) / (np.abs(actual_changes) + 1e-8)
-    magnitude_accuracy = np.mean((magnitude_ratio >= 0.5) & (magnitude_ratio <= 2.0))
-    
-    print("\nChange Prediction Analysis:")
-    print(f"Direction Accuracy: {direction_accuracy:.4f}")
-    print(f"Magnitude Accuracy: {magnitude_accuracy:.4f}")
-    print(f"Average Actual Change: {np.abs(actual_changes).mean():.4f}")
-    print(f"Average Predicted Change: {np.abs(pred_changes).mean():.4f}")
-
-def create_detailed_gene_plots(predictions, targets, dataset, save_dir):
-    save_dir='plottings_STGCN'
-    os.makedirs(save_dir, exist_ok=True)
-    genes = list(dataset.node_map.keys())
-    num_genes = len(genes)
-
-    genes_per_page = 5
-    num_pages = (num_genes + genes_per_page - 1) // genes_per_page
-
-    for page in range(num_pages):
-        start_idx = page * genes_per_page
-        end_idx = min((page + 1) * genes_per_page, num_genes)
-        current_genes = genes[start_idx:end_idx]
-
-        fig, axes = plt.subplots(5, 4, figsize=(10, 20))
-        fig.suptitle(f'Gene Predictions vs Actuals (Page {page+1}/{num_pages})', fontsize=16)
-        axes = axes.flatten()
-
-        for i,gene in enumerate(current_genes):
-            gene_idx = dataset.node_map[gene]
-            pred = predictions[:,0,gene_idx]
-            true = targets[:,0, gene_idx]
-
-            if not (np.isnan(pred).any() or np.isnan(true).any()):
-                corr, p_value = pearsonr(pred, true)
-                corr_text = f'Correlation: {corr:.3f}\np-value: {p_value:.3e}'
-            else:
-                corr_text = 'Correlation: N/A'
-
-            # Create subplot
-            ax = axes[i]
-            ax.plot(true, label='Actual', marker='o')
-            ax.plot(pred, label='Predicted', marker='s')
-            ax.set_title(f'Gene: {gene}\n{corr_text}')
-            ax.set_xlabel('Time Step')
-            ax.set_ylabel('Expression Level')
-            ax.legend()
-            ax.grid(True)
-
-            rmse = np.sqrt(np.mean((pred - true) ** 2))
-            ax.text(0.05, 0.95, f'RMSE: {rmse:.3f}', 
-                   transform=ax.transAxes, 
-                   verticalalignment='top')
-        
-        for j in range(len(current_genes), len(axes)):
-            axes[j].set_visible(False)
-        
-        plt.tight_layout()
-        plt.savefig(f'{save_dir}/gene_predictions_page_{page+1}.png', 
-                   bbox_inches='tight', dpi=300)
-        plt.close()
     
 class Args:
     def __init__(self):
@@ -752,19 +457,20 @@ if __name__ == "__main__":
     save_dir='plottings_STGCN'
     )
 
-    analyze_temporal_patterns(model, val_sequences, val_labels, dataset)
+
+    metrics = evaluate_model_performance(model, val_sequences, val_labels, dataset)
 
     print("\nModel Performance Summary:")
-    print(f"Overall Metrics:")
-    print(f"Pearson Correlation: {metrics['Overall']['Pearson_Correlation']:.4f}")
-    print(f"RMSE: {metrics['Overall']['RMSE']:.4f}")
-    print(f"R² Score: {metrics['Overall']['R2_Score']:.4f}")
-    
-    print(f"\nGene-wise Performance:")
-    print(f"Mean Gene Correlation: {metrics['Gene_Performance']['Mean_Correlation']:.4f}")
-    print(f"Best Performing Genes: {', '.join(metrics['Gene_Performance']['Best_Genes'])}")
-    
-    print(f"\nTemporal Performance:")
-    print(f"DTW Distance: {metrics['Temporal_Stability']['dtw_mean']:.4f}")
-    print(f"Temporal Correlation: {metrics['Temporal_Stability']['temporal_correlation']:.4f}")
-    print(f"Pattern Similarity: {metrics['Temporal_Stability']['pattern_similarity']:.4f}")
+    print("\nOverall Metrics:")
+    for metric, value in metrics['Overall'].items():
+        print(f"{metric}: {value:.4f}")
+
+    print("\nGene Performance:")
+    print(f"Mean Gene Correlation: {metrics['Gene']['Mean_Correlation']:.4f}")
+    print(f"Best Performing Genes: {', '.join(metrics['Gene']['Best_Genes'])}")
+
+    print("\nTemporal Performance:")
+    print(f"Direction Accuracy: {metrics['Temporal']['Direction_Accuracy']:.4f}")
+    print(f"Mean Temporal Correlation: {metrics['Temporal']['Mean_Temporal_Correlation']:.4f}")
+    print(f"Average True Change: {metrics['Temporal']['Mean_True_Change']:.4f}")
+    print(f"Average Predicted Change: {metrics['Temporal']['Mean_Pred_Change']:.4f}")
