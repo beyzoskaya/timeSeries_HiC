@@ -20,7 +20,7 @@ from STGCN.model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected
 import argparse
 from scipy.spatial.distance import cdist
 from create_graph_and_embeddings_STGCN import *
-from STGCN_losses import temporal_pattern_loss, change_magnitude_loss
+from STGCN_losses import temporal_loss_for_projected_model
 from evaluation import *
     
 def process_batch(seq, label):
@@ -97,8 +97,9 @@ def train_stgcn(dataset, val_ratio=0.2):
     model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
     model = model.float() # convert model to float otherwise I am getting type error
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)
-    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    #criterion = nn.MSELoss()
+    #criterion = temporal_loss_for_projected_model
 
     num_epochs = 100
     best_val_loss = float('inf')
@@ -132,7 +133,7 @@ def train_stgcn(dataset, val_ratio=0.2):
 
             # Don't take the last point for temporal loss !!!!!!
             #target = target[:, :, -1:, :]  # Keep only the last timestep
-            output = output[:, :, -1:, :]
+            #output = output[:, :, -1:, :]
 
             batch_stats.append({
                 'target_range': [target.min().item(), target.max().item()],
@@ -144,21 +145,32 @@ def train_stgcn(dataset, val_ratio=0.2):
             all_targets.append(target.detach().cpu().numpy())
             all_outputs.append(output.detach().cpu().numpy())
             #loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
-            loss = criterion(output, target)
+            loss = temporal_loss_for_projected_model(
+                output[:, :, -1:, :],
+                target,
+                x
+            )
+            if torch.isnan(loss):
+                print("NaN loss detected!")
+                print(f"Output range: [{output.min().item():.4f}, {output.max().item():.4f}]")
+                print(f"Target range: [{target.min().item():.4f}, {target.max().item():.4f}]")
+                continue
 
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
 
-        #if epoch % 5 == 0:
-        #    targets = np.concatenate(all_targets)
-        #    outputs = np.concatenate(all_outputs)
-        #    print(f"\nEpoch {epoch} Detailed Statistics:")
-        #    print(f"Target range: [{targets.min():.4f}, {targets.max():.4f}]")
-        #    print(f"Target mean: {targets.mean():.4f}")
-        #    print(f"Output range: [{outputs.min():.4f}, {outputs.max():.4f}]")
-        #    print(f"Output mean: {outputs.mean():.4f}")
-        #    print(f"Loss: {total_loss/len(train_sequences):.4f}")
+        # if epoch % 10 == 0:
+        #         with torch.no_grad():
+        #             mse = F.mse_loss(output, target)
+        #             dir_loss = criterion(output, target, alpha=1, beta=0, gamma=0) - mse
+        #             mag_loss = criterion(output, target, alpha=0, beta=1, gamma=0) - mse
+        #             temp_loss = criterion(output, target, alpha=0, beta=0, gamma=1) - mse
+        #             print(f"\nLoss Components:")
+        #             print(f"MSE: {mse.item():.4f}")
+        #             print(f"Direction: {dir_loss.item():.4f}")
+        #             print(f"Magnitude: {mag_loss.item():.4f}")
+        #             print(f"Temporal: {temp_loss.item():.4f}")
 
         model.eval()
         val_loss = 0
@@ -174,13 +186,13 @@ def train_stgcn(dataset, val_ratio=0.2):
 
                 # Don't take the last point for temporal loss!!!
                 #target = target[:, :, -1:, :]  
-                output = output[:, :, -1:, :]
+                #output = output[:, :, -1:, :]
 
                 #print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
                 #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
                 #val_loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
-                val_loss = criterion(output, target)
+                val_loss = temporal_loss_for_projected_model(output[:, :, -1:, :], target, x)
                 val_loss_total += val_loss.item()
 
                 output_corr = calculate_correlation(output)
@@ -225,26 +237,18 @@ def train_stgcn(dataset, val_ratio=0.2):
     model.load_state_dict(checkpoint['model_state_dict'])
     
     # Plot training progress
-    plt.figure(figsize=(15, 5))
+    plt.figure(figsize=(10, 5))
     
-    plt.subplot(1, 2, 1)
     plt.plot(train_losses, label='Train')
     plt.plot(val_losses, label='Validation')
     plt.title('Training and Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
-
-    plt.subplot(1, 2, 2)
-    plt.plot(interaction_losses, label='Interaction Loss')
-    plt.title('Interaction Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
     
     plt.tight_layout()
     plt.show()
-    plt.savefig(f'{save_dir}/training_progress.png')
+    #plt.savefig(f'{save_dir}/training_progress.png')
     plt.close()
     
     return model, val_sequences, val_labels, train_losses, val_losses  
@@ -277,7 +281,7 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_d
     # Calculate metrics
     overall_metrics = calculate_overall_metrics(predictions, targets)
     gene_metrics = calculate_gene_metrics(predictions, targets, dataset)
-    temporal_metrics = calculate_temporal_metrics(predictions, targets, dataset)
+    temporal_metrics = calculate_temporal_metrics_detailly(predictions, targets, dataset)
     
     # Create visualizations
     create_evaluation_plots(predictions, targets, dataset, save_dir)
@@ -365,6 +369,96 @@ def calculate_temporal_metrics(predictions, targets, dataset):
     
     return metrics
 
+def calculate_temporal_metrics_detailly(predictions, targets, dataset):
+    """Calculate temporal prediction metrics with more appropriate temporal measures."""
+    metrics = {}
+    
+
+    """
+    What if we shift one sequence by sequence length amount?
+    """
+    # 1. Time-lagged Cross Correlation
+    def time_lagged_correlation(true_seq, pred_seq, max_lag=3):
+        correlations = []
+        for lag in range(max_lag + 1):
+            if lag == 0:
+                corr = np.corrcoef(true_seq, pred_seq)[0, 1]
+            else:
+                corr = np.corrcoef(true_seq[lag:], pred_seq[:-lag])[0, 1]
+            correlations.append(corr)
+        return np.max(correlations)  # Return max correlation across lags
+    
+    """
+    measures the similarity between two temporal sequences by finding the optimal alignment between them
+
+    True sequence:  [1, 2, 3, 2, 1]
+    Pred sequence: [1, 1, 2, 3, 1]
+
+    DTW process:
+    1. Creates a matrix of distances
+    2. For each point, calculates:
+    - Direct cost (difference between values)
+    - Adds minimum cost from previous steps
+    3. Finds optimal path through matrix that minimizes total distance
+
+    Visual example:
+    True:  1 -> 2 -> 3 -> 2 -> 1
+            \   |  /  |    /
+    Pred:   1 -> 1 -> 2 -> 3 -> 1
+    """
+    # 2. Dynamic Time Warping Distance
+    def dtw_distance(true_seq, pred_seq):
+        n, m = len(true_seq), len(pred_seq)
+        dtw_matrix = np.zeros((n+1, m+1))
+        dtw_matrix[1:, 0] = np.inf
+        dtw_matrix[0, 1:] = np.inf
+        
+        for i in range(1, n+1):
+            for j in range(1, m+1):
+                cost = abs(true_seq[i-1] - pred_seq[j-1])
+                dtw_matrix[i, j] = cost + min(dtw_matrix[i-1, j],    # insertion
+                                            dtw_matrix[i, j-1],    # deletion
+                                            dtw_matrix[i-1, j-1])  # match
+        return dtw_matrix[n, m]
+    
+    # Calculate temporal metrics for each gene
+    genes = list(dataset.node_map.keys())
+    temporal_metrics = []
+    dtw_distances = []
+    direction_accuracies = []
+    
+    for gene_idx, gene in enumerate(genes):
+        true_seq = targets[:, gene_idx]
+        pred_seq = predictions[:, gene_idx]
+        
+        # Time-lagged correlation
+        temp_corr = time_lagged_correlation(true_seq, pred_seq)
+        temporal_metrics.append(temp_corr)
+        
+        # DTW distance
+        dtw_dist = dtw_distance(true_seq, pred_seq)
+        dtw_distances.append(dtw_dist)
+        
+        # Direction of changes
+        true_changes = np.diff(true_seq)
+        pred_changes = np.diff(pred_seq)
+        dir_acc = np.mean(np.sign(true_changes) == np.sign(pred_changes))
+        direction_accuracies.append(dir_acc)
+    
+    metrics['Mean_Temporal_Correlation'] = np.mean(temporal_metrics)
+    metrics['Mean_DTW_Distance'] = np.mean(dtw_distances)
+    metrics['Mean_Direction_Accuracy'] = np.mean(direction_accuracies)
+    
+    # Calculate rate of change metrics
+    true_changes = np.diff(targets, axis=0)
+    pred_changes = np.diff(predictions, axis=0)
+    
+    metrics['Mean_True_Change'] = np.mean(np.abs(true_changes))
+    metrics['Mean_Pred_Change'] = np.mean(np.abs(pred_changes))
+    metrics['Change_Magnitude_Ratio'] = metrics['Mean_Pred_Change'] / metrics['Mean_True_Change']
+    
+    return metrics
+
 def create_gene_temporal_plots(predictions, targets, dataset, save_dir):
     """Create temporal pattern plots for all genes across multiple pages."""
     genes = list(dataset.node_map.keys())
@@ -433,7 +527,155 @@ def create_evaluation_plots(predictions, targets, dataset, save_dir):
     
     # 3. Gene temporal patterns for all genes
     create_gene_temporal_plots(predictions, targets, dataset, save_dir)
+
+def get_predictions_and_targets(model, val_sequences, val_labels):
+    """Extract predictions and targets from validation data."""
+    model.eval()
+    all_predictions = []
+    all_targets = []
     
+    with torch.no_grad():
+        for seq, label in zip(val_sequences, val_labels):
+            x, target = process_batch(seq, label)
+            output = model(x)
+            
+            # Take last time step for predictions
+            output = output[:, :, -1:, :]
+            
+            # Convert to numpy and reshape
+            pred = output.squeeze().cpu().numpy()  # Should be [52] or [1, 52]
+            true = target.squeeze().cpu().numpy()  # Should be [52] or [1, 52]
+            
+            if len(pred.shape) == 1:
+                pred = pred.reshape(1, -1)
+            if len(true.shape) == 1:
+                true = true.reshape(1, -1)
+            
+            all_predictions.append(pred)
+            all_targets.append(true)
+
+    predictions = np.vstack(all_predictions)  # Should be [8, 52]
+    targets = np.vstack(all_targets)        # Should be [8, 52]
+    
+    print(f"Predictions shape: {predictions.shape}")
+    print(f"Targets shape: {targets.shape}")
+    
+    return predictions, targets
+
+def analyze_gene_characteristics(dataset, predictions, targets):
+    """Analyze relationship between gene properties and prediction performance"""
+    genes = list(dataset.node_map.keys())
+    
+    # Calculate gene correlations
+    gene_correlations = {}
+    for gene in genes:
+        gene_idx = dataset.node_map[gene]
+        pred_gene = predictions[:, gene_idx]  # [time_points]
+        true_gene = targets[:, gene_idx]
+        corr, _ = pearsonr(pred_gene, true_gene)
+        gene_correlations[gene] = corr
+    
+    # Collect gene properties
+    gene_stats = {gene: {
+        'degree': len(dataset.base_graph[gene]),
+        'expression_range': None,
+        'expression_std': None,
+        'correlation': gene_correlations[gene]
+    } for gene in genes}
+    
+    # Calculate expression statistics
+    for gene in genes:
+        all_expressions = []
+        for t in dataset.time_points:
+            gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+            gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+            expr_values = np.concatenate([gene1_expr, gene2_expr])
+            all_expressions.extend(expr_values)
+        
+        all_expressions = np.array(all_expressions)
+        gene_stats[gene].update({
+            'expression_range': np.ptp(all_expressions),
+            'expression_std': np.std(all_expressions)
+        })
+    
+    # Create analysis plots
+    plt.figure(figsize=(15, 10))
+    
+    # 1. Correlation vs Degree
+    plt.subplot(2, 2, 1)
+    degrees = [gene_stats[gene]['degree'] for gene in genes]
+    correlations = [gene_stats[gene]['correlation'] for gene in genes]
+    plt.scatter(degrees, correlations)
+    plt.xlabel('Number of Interactions')
+    plt.ylabel('Prediction Correlation')
+    plt.title('Gene Connectivity vs Prediction Performance')
+    
+    # 2. Correlation vs Expression Range
+    plt.subplot(2, 2, 2)
+    ranges = [gene_stats[gene]['expression_range'] for gene in genes]
+    plt.scatter(ranges, correlations)
+    plt.xlabel('Expression Range')
+    plt.ylabel('Prediction Correlation')
+    plt.title('Expression Variability vs Prediction Performance')
+    
+    plt.subplot(2, 2, 3)
+    plt.hist(correlations, bins=20)
+    plt.xlabel('Correlation')
+    plt.ylabel('Count')
+    plt.title('Distribution of Gene Correlations')
+    
+    plt.tight_layout()
+    plt.savefig('plottings_STGCN/gene_analysis.png')
+    plt.close()
+    
+    print("\nGene Analysis Summary:")
+    print("\nTop 5 Most Connected Genes:")
+    sorted_by_degree = sorted(gene_stats.items(), key=lambda x: x[1]['degree'], reverse=True)[:5]
+    for gene, stats in sorted_by_degree:
+        print(f"{gene}: {stats['degree']} connections, correlation: {stats['correlation']:.4f}")
+    
+    print("\nTop 5 Most Variable Genes:")
+    sorted_by_range = sorted(gene_stats.items(), key=lambda x: x[1]['expression_range'], reverse=True)[:5]
+    for gene, stats in sorted_by_range:
+        print(f"{gene}: range {stats['expression_range']:.4f}, correlation: {stats['correlation']:.4f}")
+    
+    print("\nTop 5 Best Predicted Genes:")
+    sorted_by_corr = sorted(gene_stats.items(), key=lambda x: x[1]['correlation'], reverse=True)[:5]
+    for gene, stats in sorted_by_corr:
+        print(f"{gene}: correlation {stats['correlation']:.4f}, connections: {stats['degree']}")
+    
+    return gene_stats
+
+def analyze_temporal_patterns(dataset, predictions, targets):
+    time_points = dataset.time_points
+    genes = list(dataset.node_map.keys())
+
+    temporal_stats = {
+        'prediction_lag': [],  # Time shift between predicted and actual peaks
+        'pattern_complexity': [],  # Number of direction changes
+        'prediction_accuracy': []  # Accuracy by time point
+    }
+
+    time_point_accuracy = []
+    for t in range(len(predictions)):
+        corr = pearsonr(predictions[t].flatten(), targets[t].flatten())[0]
+        time_point_accuracy.append(corr)
+    
+    plt.figure(figsize=(15, 5))
+    plt.plot(time_point_accuracy)
+    plt.xlabel('Time Point')
+    plt.ylabel('Prediction Accuracy')
+    plt.title('Prediction Accuracy Over Time')
+    plt.savefig(f'plottings_STGCN/pred_accuracy.png')
+
+    print("\nTemporal Analysis:")
+    print(f"Best predicted time point: {np.argmax(time_point_accuracy)}")
+    print(f"Worst predicted time point: {np.argmin(time_point_accuracy)}")
+    print(f"Mean accuracy: {np.mean(time_point_accuracy):.4f}")
+    print(f"Std of accuracy: {np.std(time_point_accuracy):.4f}")
+    
+    return temporal_stats
+
 class Args:
     def __init__(self):
         self.Kt = 3  # temporal kernel size
@@ -449,7 +691,7 @@ class Args:
         self.act_func = 'glu'
         self.graph_conv_type = 'cheb_graph_conv'
         self.enable_bias = True
-        self.droprate = 0.3
+        self.droprate = 0
 
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
@@ -473,7 +715,11 @@ if __name__ == "__main__":
     print(f"Best Performing Genes: {', '.join(metrics['Gene']['Best_Genes'])}")
 
     print("\nTemporal Performance:")
-    print(f"Direction Accuracy: {metrics['Temporal']['Direction_Accuracy']:.4f}")
-    print(f"Mean Temporal Correlation: {metrics['Temporal']['Mean_Temporal_Correlation']:.4f}")
-    print(f"Average True Change: {metrics['Temporal']['Mean_True_Change']:.4f}")
-    print(f"Average Predicted Change: {metrics['Temporal']['Mean_Pred_Change']:.4f}")
+    print(f"Time-lagged Correlation: {metrics['Temporal']['Mean_Temporal_Correlation']:.4f}")
+    print(f"DTW Distance: {metrics['Temporal']['Mean_DTW_Distance']:.4f}")
+    print(f"Direction Accuracy: {metrics['Temporal']['Mean_Direction_Accuracy']:.4f}")
+    print(f"Change Magnitude Ratio: {metrics['Temporal']['Change_Magnitude_Ratio']:.4f}")
+
+    predictions, targets = get_predictions_and_targets(model, val_sequences, val_labels)
+    gene_stats = analyze_gene_characteristics(dataset, predictions, targets)
+    temporal_stats = analyze_temporal_patterns(dataset, predictions, targets)
