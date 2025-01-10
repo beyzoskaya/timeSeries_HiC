@@ -16,7 +16,7 @@ from STGCN.model.models import *
 import sys
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 sys.path.append('./STGCN')
-from STGCN.model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected
+from STGCN.model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected, STGCNGraphConv, STGCNGraphConvProjected
 import argparse
 from scipy.spatial.distance import cdist
 from create_graph_and_embeddings_STGCN import *
@@ -94,10 +94,10 @@ def train_stgcn(dataset, val_ratio=0.2):
     print(f"Number of validation sequences: {len(val_sequences)}")
     
     # Initialize STGCN
-    model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
+    model = STGCNGraphConvProjected(args, args.blocks, args.n_vertex)
     model = model.float() # convert model to float otherwise I am getting type error
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)
     #criterion = nn.MSELoss()
     #criterion = temporal_loss_for_projected_model
 
@@ -689,7 +689,7 @@ class Args:
             [32, 32, 1]      # Output block
         ]
         self.act_func = 'glu'
-        self.graph_conv_type = 'cheb_graph_conv'
+        self.graph_conv_type = 'graph_conv'
         self.enable_bias = True
         self.droprate = 0
 
