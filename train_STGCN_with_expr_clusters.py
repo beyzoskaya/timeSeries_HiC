@@ -2,7 +2,7 @@ from create_graph_and_embeddings_STGCN import *
 from STGCN_training import *
 from evaluation import *
 from utils import process_batch, calculate_correlation
-from ontology_analysis import analyze_expression_levels
+from ontology_analysis import analyze_expression_levels, analyze_expression_levels_kmeans
 
 import torch
 import torch.nn as nn
@@ -81,8 +81,8 @@ def get_cluster_blocks(num_nodes, expression_level):
     if expression_level == 'high_expr':
         return [
             [32, 32, 32],
-            [32, 64, 64],
-            [64, 32, 1]
+            [32, 48, 48],
+            [48, 32, 1]
         ]
     elif expression_level == 'medium_expr':
         return [
@@ -93,12 +93,12 @@ def get_cluster_blocks(num_nodes, expression_level):
     else: # low_expr
         return [
             [32, 32, 32],
-            [32, 8, 8],
-            [8, 4, 1]
+            [32, 16, 16],
+            [16, 8, 1]
         ]
     
 def train_cluster_models(dataset, temporal_loss_fn):
-    clusters, gene_expressions = analyze_expression_levels(dataset)
+    clusters, gene_expressions = analyze_expression_levels_kmeans(dataset)
 
     cluster_models = {}
     cluster_metrics = {}
@@ -240,7 +240,7 @@ def test_cluster_predictions(cluster_models, dataset, temporal_loss_fn):
     predictions = {}
     metrics = {}
     
-    clusters, _ = analyze_expression_levels(dataset)
+    clusters, _ = analyze_expression_levels_kmeans(dataset)
     
     for cluster_name, model in cluster_models.items():
         cluster_dataset = filter_dataset_by_cluster(dataset, clusters[cluster_name])
@@ -341,7 +341,7 @@ def create_gene_temporal_plots(predictions, targets, dataset, all_genes, cluster
 
 def combine_cluster_evaluations(cluster_models, dataset):
     """Evaluate the combined performance of all cluster models."""
-    clusters, _ = analyze_expression_levels(dataset)
+    clusters, _ = analyze_expression_levels_kmeans(dataset)
     all_predictions = []
     all_targets = []
     all_genes = []
