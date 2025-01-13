@@ -81,8 +81,8 @@ def get_cluster_blocks(num_nodes, expression_level):
     if expression_level == 'high_expr':
         return [
             [32, 32, 32],
-            [32, 16, 16],
-            [16, 16, 1]
+            [32, 64, 64],
+            [64, 32, 1]
         ]
     elif expression_level == 'medium_expr':
         return [
@@ -90,7 +90,7 @@ def get_cluster_blocks(num_nodes, expression_level):
             [32, 16, 16],
             [16, 8, 1]
         ]
-    else:
+    else: # low_expr
         return [
             [32, 32, 32],
             [32, 8, 8],
@@ -131,13 +131,14 @@ def train_cluster_models(dataset, temporal_loss_fn):
                 
             # Split data
             n_samples = len(sequences)
-            n_train = int(n_samples * 0.8)  # 80-20 split
+            n_train = int(n_samples * (1 - 0.2))
             indices = torch.randperm(n_samples)
-            
-            train_sequences = [sequences[i] for i in indices[:n_train]]
-            train_labels = [labels[i] for i in indices[:n_train]]
-            val_sequences = [sequences[i] for i in indices[n_train:]]
-            val_labels = [labels[i] for i in indices[n_train:]]
+            train_idx = indices[:n_train]
+            val_idx = indices[n_train:]
+            train_sequences = [sequences[i] for i in train_idx]
+            train_labels = [labels[i] for i in train_idx]
+            val_sequences = [sequences[i] for i in val_idx]
+            val_labels = [labels[i] for i in val_idx]
             
             # Training setup
             optimizer = optim.Adam(model.parameters(),  lr=0.0001, weight_decay=1e-5)
@@ -284,80 +285,121 @@ class Args:
         self.graph_conv_type = 'graph_conv'
         self.enable_bias = True
         self.droprate = 0.1
+def create_gene_temporal_plots(predictions, targets, dataset, all_genes, clusters, save_dir):
+    """Create temporal pattern plots for all genes across multiple pages."""
+    genes_per_page = 15  # Show 15 genes per page (5x3 grid)
+    num_genes = len(all_genes)
+    num_pages = (num_genes + genes_per_page - 1) // genes_per_page
+    
+    # Create color mapping for clusters
+    colors = {'high_expr': 'red', 'medium_expr': 'blue', 'low_expr': 'green'}
+    
+    for page in range(num_pages):
+        plt.figure(figsize=(20, 15))
+        start_idx = page * genes_per_page
+        end_idx = min((page + 1) * genes_per_page, num_genes)
+        current_genes = all_genes[start_idx:end_idx]
+        
+        for i, gene in enumerate(current_genes):
+            plt.subplot(5, 3, i+1)
+            gene_idx = all_genes.index(gene)
+            
+            # Get gene's cluster
+            gene_cluster = next(cluster_name for cluster_name, genes in clusters.items() 
+                              if gene in genes)
+            
+            # Plot actual and predicted values
+            plt.plot(targets[:, gene_idx], 'b-', label='Actual', marker='o')
+            plt.plot(predictions[:, gene_idx], 'r--', label='Predicted', marker='s')
+            
+            # Calculate metrics for this gene
+            corr, _ = pearsonr(targets[:, gene_idx], predictions[:, gene_idx])
+            rmse = np.sqrt(mean_squared_error(targets[:, gene_idx], predictions[:, gene_idx]))
+            
+            # Calculate direction accuracy
+            actual_changes = np.diff(targets[:, gene_idx])
+            pred_changes = np.diff(predictions[:, gene_idx])
+            direction_acc = np.mean(np.sign(actual_changes) == np.sign(pred_changes))
+            
+            plt.title(f'Gene: {gene} ({gene_cluster})\nCorr: {corr:.3f}, RMSE: {rmse:.3f}\nDir Acc: {direction_acc:.3f}')
+            plt.xlabel('Time Step')
+            plt.ylabel('Expression')
+            if i == 0:
+                plt.legend()
+            
+            # Add grid for better readability
+            plt.grid(True, linestyle='--', alpha=0.7)
+        
+        plt.tight_layout()
+        plt.savefig(f'{save_dir}/temporal_patterns_page_{page+1}.png')
+        plt.close()
+        print(f"Created page {page+1} showing genes {start_idx+1}-{end_idx}")
 
 def combine_cluster_evaluations(cluster_models, dataset):
     """Evaluate the combined performance of all cluster models."""
+    clusters, _ = analyze_expression_levels(dataset)
     all_predictions = []
     all_targets = []
-    cluster_specific_metrics = {}
-    clusters, _ = analyze_expression_levels(dataset)
+    all_genes = []
     
-    # Get predictions from each cluster
+    # Process each cluster
     for cluster_name, model in cluster_models.items():
         print(f"\nEvaluating {cluster_name} cluster...")
         cluster_dataset = filter_dataset_by_cluster(dataset, clusters[cluster_name])
-        sequences, labels = cluster_dataset.get_temporal_sequences()
         
+        # Get validation sequences
+        sequences, labels = cluster_dataset.get_temporal_sequences()
+        n_samples = len(sequences)
+        n_val = int(n_samples * 0.2)  # 20% validation
+        val_sequences = sequences[-n_val:]
+        val_labels = labels[-n_val:]
+        
+        # Get predictions for validation set
         model.eval()
         with torch.no_grad():
-            for seq, label in zip(sequences, labels):
+            cluster_predictions = []
+            cluster_targets = []
+            
+            for seq, label in zip(val_sequences, val_labels):
                 x, target = process_batch(seq, label)
                 output = model(x)
                 
-                # Extract predictions and targets
+                # Take only the prediction point
                 pred = output[:, :, -1:, :].squeeze().cpu().numpy()
                 true = target.squeeze().cpu().numpy()
                 
-                # Store with cluster information
-                for gene_idx, gene in enumerate(clusters[cluster_name]):
-                    all_predictions.append({
-                        'gene': gene,
-                        'cluster': cluster_name,
-                        'predictions': pred[:, gene_idx],
-                        'original_idx': dataset.node_map[gene]
-                    })
-                    all_targets.append({
-                        'gene': gene,
-                        'cluster': cluster_name,
-                        'targets': true[:, gene_idx],
-                        'original_idx': dataset.node_map[gene]
-                    })
-
-    # Sort by original indices to maintain consistent order
-    all_predictions.sort(key=lambda x: x['original_idx'])
-    all_targets.sort(key=lambda x: x['original_idx'])
+                if len(pred.shape) == 0:
+                    pred = np.array([pred])
+                if len(true.shape) == 0:
+                    true = np.array([true])
+                
+                cluster_predictions.append(pred)
+                cluster_targets.append(true)
+            
+            if cluster_predictions:
+                cluster_predictions = np.concatenate([p.reshape(1, -1) if p.ndim == 1 else p for p in cluster_predictions])
+                cluster_targets = np.concatenate([t.reshape(1, -1) if t.ndim == 1 else t for t in cluster_targets])
+                
+                all_predictions.append(cluster_predictions)
+                all_targets.append(cluster_targets)
+                all_genes.extend(clusters[cluster_name])
     
-    # Convert to arrays for metric calculation
-    pred_array = np.array([p['predictions'] for p in all_predictions])
-    target_array = np.array([t['targets'] for t in all_targets])
+    # Combine predictions from all clusters
+    pred_array = np.concatenate(all_predictions, axis=1)
+    target_array = np.concatenate(all_targets, axis=1)
     
-    # Calculate overall metrics
-    overall_metrics = {
-        'MSE': mean_squared_error(target_array.flatten(), pred_array.flatten()),
-        'MAE': mean_absolute_error(target_array.flatten(), pred_array.flatten()),
-        'R2': r2_score(target_array.flatten(), pred_array.flatten()),
-        'Pearson': pearsonr(target_array.flatten(), pred_array.flatten())[0]
-    }
+    print(f"\nFinal prediction array shape: {pred_array.shape}")
+    print(f"Final target array shape: {target_array.shape}")
     
-    # Calculate metrics per cluster
-    cluster_metrics = {}
-    for cluster_name in clusters.keys():
-        cluster_indices = [i for i, p in enumerate(all_predictions) if p['cluster'] == cluster_name]
-        if cluster_indices:
-            cluster_pred = pred_array[cluster_indices].flatten()
-            cluster_target = target_array[cluster_indices].flatten()
-            cluster_metrics[cluster_name] = {
-                'MSE': mean_squared_error(cluster_target, cluster_pred),
-                'MAE': mean_absolute_error(cluster_target, cluster_pred),
-                'R2': r2_score(cluster_target, cluster_pred),
-                'Pearson': pearsonr(cluster_target, cluster_pred)[0]
-            }
-    
-    # Calculate temporal metrics
+    # Calculate metrics
+    overall_metrics = calculate_overall_metrics(pred_array, target_array)
+    cluster_metrics = calculate_cluster_metrics(pred_array, target_array, all_genes, clusters)
     temporal_metrics = calculate_temporal_metrics(pred_array, target_array)
     
     # Create visualizations
-    create_combined_evaluation_plots(pred_array, target_array, all_predictions, dataset)
+    create_gene_temporal_plots(pred_array, target_array, 
+                             dataset, all_genes, clusters, 
+                             save_dir='plottings_STGCN')
     
     return {
         'overall': overall_metrics,
@@ -365,86 +407,105 @@ def combine_cluster_evaluations(cluster_models, dataset):
         'temporal': temporal_metrics
     }
 
-def calculate_temporal_metrics(predictions, targets):
-    """Calculate temporal metrics for the combined predictions."""
-    temporal_metrics = {}
+def calculate_overall_metrics(pred_array, target_array):
+    """Calculate overall metrics across all predictions."""
+    return {
+        'MSE': mean_squared_error(target_array.flatten(), pred_array.flatten()),
+        'MAE': mean_absolute_error(target_array.flatten(), pred_array.flatten()),
+        'R2': r2_score(target_array.flatten(), pred_array.flatten()),
+        'Pearson': pearsonr(target_array.flatten(), pred_array.flatten())[0]
+    }
+
+def calculate_cluster_metrics(pred_array, target_array, all_genes, clusters):
+    """Calculate metrics for each cluster."""
+    cluster_metrics = {}
     
-    # Direction accuracy
-    true_changes = np.diff(targets, axis=1)
-    pred_changes = np.diff(predictions, axis=1)
+    for cluster_name, cluster_genes in clusters.items():
+        # Get indices for genes in this cluster
+        cluster_indices = [i for i, gene in enumerate(all_genes) if gene in cluster_genes]
+        if cluster_indices:
+            cluster_pred = pred_array[cluster_indices].flatten()
+            cluster_target = target_array[cluster_indices].flatten()
+            
+            cluster_metrics[cluster_name] = {
+                'MSE': mean_squared_error(cluster_target, cluster_pred),
+                'MAE': mean_absolute_error(cluster_target, cluster_pred),
+                'R2': r2_score(cluster_target, cluster_pred),
+                'Pearson': pearsonr(cluster_target, cluster_pred)[0]
+            }
+    
+    return cluster_metrics
+
+def calculate_temporal_metrics(pred_array, target_array):
+    """Calculate temporal metrics across genes."""
+    metrics = {}
+    
+    # Direction accuracy (for each gene across time)
+    true_changes = np.diff(target_array, axis=1)
+    pred_changes = np.diff(pred_array, axis=1)
     direction_match = np.sign(true_changes) == np.sign(pred_changes)
-    temporal_metrics['Direction_Accuracy'] = np.mean(direction_match)
+    metrics['Direction_Accuracy'] = np.mean(direction_match)
     
-    # Temporal correlation
+    # Temporal correlation for each gene
     temporal_corrs = []
-    for i in range(predictions.shape[0]):
-        corr, _ = pearsonr(predictions[i], targets[i])
-        temporal_corrs.append(corr)
-    temporal_metrics['Mean_Temporal_Correlation'] = np.mean(temporal_corrs)
+    for i in range(pred_array.shape[0]):
+        if len(pred_array[i]) >= 2:  # Need at least 2 points for correlation
+            try:
+                corr, _ = pearsonr(pred_array[i], target_array[i])
+                if not np.isnan(corr):
+                    temporal_corrs.append(corr)
+            except Exception as e:
+                continue
+    
+    metrics['Mean_Temporal_Correlation'] = np.mean(temporal_corrs) if temporal_corrs else np.nan
     
     # Change magnitude accuracy
     true_magnitude = np.abs(true_changes)
     pred_magnitude = np.abs(pred_changes)
-    temporal_metrics['Change_Magnitude_Ratio'] = np.mean(pred_magnitude) / np.mean(true_magnitude)
+    metrics['Change_Magnitude_Ratio'] = (np.mean(pred_magnitude) / np.mean(true_magnitude) 
+                                       if np.mean(true_magnitude) != 0 else np.nan)
     
-    return temporal_metrics
+    print("\nTemporal Metrics Statistics:")
+    print(f"Number of genes with valid correlations: {len(temporal_corrs)}")
+    print(f"Average temporal correlation: {metrics['Mean_Temporal_Correlation']:.4f}")
+    print(f"Direction accuracy: {metrics['Direction_Accuracy']:.4f}")
+    print(f"Change magnitude ratio: {metrics['Change_Magnitude_Ratio']:.4f}")
+    
+    return metrics
 
-def create_combined_evaluation_plots(predictions, targets, all_predictions, dataset, save_dir='plottings_STGCN'):
-    """Create visualization plots for the combined evaluation."""
-    # 1. Overall scatter plot
-    plt.figure(figsize=(10, 8))
-    colors = {'high_expr': 'red', 'medium_expr': 'blue', 'low_expr': 'green'}
-    for cluster in colors:
-        mask = [p['cluster'] == cluster for p in all_predictions]
-        if any(mask):
-            cluster_preds = predictions[mask].flatten()
-            cluster_targets = targets[mask].flatten()
-            plt.scatter(cluster_targets, cluster_preds, 
-                       alpha=0.5, label=cluster, c=colors[cluster])
+def debug_temporal_sequences(dataset):
+    """Debug function to understand temporal sequence creation"""
+    print("\nDebugging Temporal Sequences:")
+    print(f"Total time points: {len(dataset.time_points)}")
+    print(f"Time points: {dataset.time_points}")
+    print(f"Sequence length: {dataset.seq_len}")
+    print(f"Prediction length: {dataset.pred_len}")
     
-    plt.plot([targets.min(), targets.max()], 
-             [targets.min(), targets.max()], 'k--', label='Perfect Prediction')
-    plt.xlabel('True Expression')
-    plt.ylabel('Predicted Expression')
-    plt.title('Expression Prediction Performance by Cluster')
-    plt.legend()
-    plt.savefig(f'{save_dir}/combined_prediction_scatter.png')
-    plt.close()
+    sequences, labels = dataset.get_temporal_sequences()
+    print(f"\nNumber of sequences created: {len(sequences)}")
     
-    # 2. Temporal pattern plot for selected genes
-    plt.figure(figsize=(15, 10))
-    genes_per_cluster = 3
-    for i, cluster in enumerate(['high_expr', 'medium_expr', 'low_expr']):
-        genes = [p['gene'] for p in all_predictions if p['cluster'] == cluster][:genes_per_cluster]
-        for j, gene in enumerate(genes):
-            plt.subplot(3, genes_per_cluster, i*genes_per_cluster + j + 1)
-            gene_idx = [idx for idx, p in enumerate(all_predictions) if p['gene'] == gene][0]
-            plt.plot(targets[gene_idx], 'b-', label='Actual')
-            plt.plot(predictions[gene_idx], 'r--', label='Predicted')
-            plt.title(f'{gene}\n({cluster})')
-            if i == 0 and j == 0:
-                plt.legend()
-    
-    plt.tight_layout()
-    plt.savefig(f'{save_dir}/combined_temporal_patterns.png')
-    plt.close()
+    # Check first few sequences
+    print("\nFirst 3 sequences structure:")
+    for i in range(min(3, len(sequences))):
+        seq = sequences[i]
+        label = labels[i]
+        print(f"\nSequence {i+1}:")
+        times_used = dataset.time_points[i:i+dataset.seq_len]
+        target_time = dataset.time_points[i+dataset.seq_len:i+dataset.seq_len+dataset.pred_len]
+        print(f"Input times: {times_used}")
+        print(f"Target time: {target_time}")
+        
+    return sequences, labels
 
-def print_combined_evaluation_results(metrics):
-    """Print the combined evaluation results in a formatted way."""
-    print("\n=== Overall Model Performance ===")
-    print("\nOverall Metrics:")
-    for metric, value in metrics['overall'].items():
-        print(f"{metric}: {value:.4f}")
-    
-    print("\nPerformance by Cluster:")
-    for cluster, cluster_metrics in metrics['per_cluster'].items():
-        print(f"\n{cluster}:")
-        for metric, value in cluster_metrics.items():
-            print(f"  {metric}: {value:.4f}")
-    
-    print("\nTemporal Performance:")
-    for metric, value in metrics['temporal'].items():
-        print(f"{metric}: {value:.4f}")
+def analyze_predictions(pred_array, target_array):
+    """Analyze the structure of predictions and targets"""
+    print("\nPrediction Array Analysis:")
+    print(f"Prediction array shape: {pred_array.shape}")
+    print(f"Target array shape: {target_array.shape}")
+    print(f"Number of time points in predictions: {pred_array.shape[1]}")
+    print("\nSample values from first gene:")
+    print(f"First 5 predictions: {pred_array[0, :5]}")
+    print(f"First 5 targets: {target_array[0, :5]}")
 
 def main():
     dataset = TemporalGraphDataset(
@@ -453,13 +514,26 @@ def main():
     seq_len=3,
     pred_len=1
 )
+    debug_temporal_sequences(dataset)
 
     cluster_models, cluster_metrics = train_cluster_models(dataset, temporal_loss_for_projected_model)
 
     combined_metrics = combine_cluster_evaluations(cluster_models, dataset)
-
-    print_combined_evaluation_results(combined_metrics)
-
+    
+    print("\n=== Combined Model Performance ===")
+    print("\nOverall Metrics:")
+    for metric, value in combined_metrics['overall'].items():
+        print(f"{metric}: {value:.4f}")
+        
+    print("\nCluster-specific Metrics:")
+    for cluster, metrics in combined_metrics['per_cluster'].items():
+        print(f"\n{cluster}:")
+        for metric, value in metrics.items():
+            print(f"  {metric}: {value:.4f}")
+            
+    print("\nTemporal Metrics:")
+    for metric, value in combined_metrics['temporal'].items():
+        print(f"{metric}: {value:.4f}")
     for cluster_name, model in cluster_models.items():
         torch.save(model.state_dict(), f'plottings_STGCN/model_{cluster_name}.pth')
 
