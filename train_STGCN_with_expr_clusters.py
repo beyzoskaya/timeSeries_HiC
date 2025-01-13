@@ -87,8 +87,8 @@ def get_cluster_blocks(num_nodes, expression_level):
     elif expression_level == 'medium_expr':
         return [
             [32, 32, 32],
-            [32, 16, 16],
-            [16, 8, 1]
+            [32, 24, 24],
+            [24, 16, 1]
         ]
     else: # low_expr
         return [
@@ -141,10 +141,11 @@ def train_cluster_models(dataset, temporal_loss_fn):
             val_labels = [labels[i] for i in val_idx]
             
             # Training setup
-            optimizer = optim.Adam(model.parameters(),  lr=0.0001, weight_decay=1e-5)
+            optimizer = optim.Adam(model.parameters(),  lr=0.00005)
             #scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5)
             best_val_loss = float('inf')
             patience_counter = 0
+            criterion = nn.MSELoss()
             
             train_losses = []
             val_losses = []
@@ -160,10 +161,12 @@ def train_cluster_models(dataset, temporal_loss_fn):
                     output = model(x)
                     
                     loss = temporal_loss_fn(
-                        output[:, :, -1:, :],
-                        target,
-                        x
+                       output[:, :, -1:, :],
+                       target,
+                       x
                     )
+
+                    #loss = criterion(output[:, :, -1:, :], target)
                     
                     if not torch.isnan(loss):
                         loss.backward()
@@ -182,6 +185,7 @@ def train_cluster_models(dataset, temporal_loss_fn):
                         x, target = process_batch(seq, label)
                         output = model(x)
                         loss = temporal_loss_fn(output[:, :, -1:, :], target, x)
+                        #loss = criterion(output[:, :, -1:, :], target)
                         val_loss += loss.item()
                 
                 avg_val_loss = val_loss / len(val_sequences)
@@ -424,8 +428,9 @@ def calculate_cluster_metrics(pred_array, target_array, all_genes, clusters):
         # Get indices for genes in this cluster
         cluster_indices = [i for i, gene in enumerate(all_genes) if gene in cluster_genes]
         if cluster_indices:
-            cluster_pred = pred_array[cluster_indices].flatten()
-            cluster_target = target_array[cluster_indices].flatten()
+            # Select cluster predictions (all time points for cluster genes)
+            cluster_pred = pred_array[:, cluster_indices].flatten()
+            cluster_target = target_array[:, cluster_indices].flatten()
             
             cluster_metrics[cluster_name] = {
                 'MSE': mean_squared_error(cluster_target, cluster_pred),
