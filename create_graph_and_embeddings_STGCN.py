@@ -19,6 +19,7 @@ sys.path.append('./STGCN')
 from STGCN.model.models import STGCNChebGraphConv
 import argparse
 from scipy.spatial.distance import cdist
+from ontology_analysis import analyze_expression_levels_kmeans, analyze_expression_levels
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -51,7 +52,7 @@ class TemporalGraphDataset:
         # Create base graph and features
         self.base_graph = self.create_base_graph()
         print("Base graph created")
-        self.node_features = self.create_temporal_node_features_several_graphs_created() # try with several graphs for time series consistency
+        self.node_features = self.create_temporal_node_features_several_graphs_created_clustering() # try with several graphs for time series consistency
         print("Temporal node features created")
         
         # Get edge information
@@ -151,11 +152,11 @@ class TemporalGraphDataset:
                 G,
                 dimensions=self.embedding_dim,
                 walk_length=20,
-                num_walks=150,
-                workers=1,
+                num_walks=75,
                 p=1.0,
                 q=1.0,
-                weight_key='weight'
+                workers=1,
+                seed=42
             )
             
             model = node2vec.fit(
@@ -200,6 +201,115 @@ class TemporalGraphDataset:
                 gene = list(self.node_map.keys())[i]
                 print(f"{gene}: {temporal_features[t][i, :5]}, Expression: {expression_values[gene]:.4f}")
         
+        return temporal_features
+    
+    def create_temporal_node_features_several_graphs_created_clustering(self):
+        temporal_features = {}
+        
+        # First, get cluster information
+        clusters, _ = analyze_expression_levels(self)
+        gene_clusters = {}
+        for cluster_name, genes in clusters.items():
+            for gene in genes:
+                gene_clusters[gene] = cluster_name
+        
+        # First, normalize all expression values across all time points
+        print("\nNormalizing expression values across all time points...")
+        all_expressions = []
+        for t in self.time_points:
+            for gene in self.node_map.keys():
+                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                all_expressions.append(expr_value)
+        
+        # Global normalization parameters
+        global_min = min(all_expressions)
+        global_max = max(all_expressions)
+        print(f"Global expression range: [{global_min:.4f}, {global_max:.4f}]")
+        
+        for t in self.time_points:
+            print(f"\nProcessing time point {t}")
+            
+            # First get normalized expression values
+            expression_values = {}
+            for gene in self.node_map.keys():
+                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                expression_values[gene] = (expr_value - global_min) / (global_max - global_min)
+            
+            # Create graph using normalized expression values and cluster information
+            G = nx.Graph()
+            G.add_nodes_from(self.node_map.keys())
+            
+            # Add edges with cluster-aware weights
+            for _, row in self.df.iterrows():
+                gene1 = row['Gene1_clean']
+                gene2 = row['Gene2_clean']
+                
+                # Calculate edge weight components
+                expr_sim = 1 / (1 + abs(expression_values[gene1] - expression_values[gene2]))
+                hic_weight = row['HiC_Interaction']
+                compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
+                tad_dist = abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance'])
+                tad_sim = 1 / (1 + tad_dist)
+                ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
+                
+                # Add cluster similarity component
+                cluster_sim = 1.2 if gene_clusters[gene1] == gene_clusters[gene2] else 1.0
+                
+                # Combine weights with cluster influence
+                weight = (hic_weight * 0.25 +
+                        compartment_sim * 0.1 +
+                        tad_sim * 0.1 +
+                        ins_sim * 0.05 +
+                        expr_sim * 0.5) * cluster_sim
+                
+                G.add_edge(gene1, gene2, weight=weight)
+            
+            # Create Node2Vec embeddings with cluster-aware weights
+            node2vec = Node2Vec(
+                G,
+                dimensions=self.embedding_dim,
+                walk_length=20,
+                num_walks=150,
+                workers=1,
+                p=1.0,
+                q=1.0,
+                weight_key='weight',
+                seed=42
+            )
+            
+            model = node2vec.fit(
+                window=15,
+                min_count=1,
+                batch_words=4
+            )
+            
+            # Create feature vectors
+            features = []
+            for gene in self.node_map.keys():
+                # Get Node2Vec embedding
+                node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
+                
+                # Normalize embedding
+                node_embedding = (node_embedding - node_embedding.min()) / (node_embedding.max() - node_embedding.min() + 1e-8)
+                
+                # Last dimension is the normalized expression value
+                node_embedding[-1] = expression_values[gene]
+                
+                features.append(node_embedding)
+            
+            temporal_features[t] = torch.stack(features)
+            
+            # Print diagnostics
+            print(f"\nFeature Statistics for time {t}:")
+            print(f"Expression range: [{min(expression_values.values()):.4f}, {max(expression_values.values()):.4f}]")
+            print(f"Embedding range: [{temporal_features[t].min():.4f}, {temporal_features[t].max():.4f}]")
+            
         return temporal_features
 
     def get_edge_index_and_attr(self):
@@ -295,3 +405,6 @@ class TemporalGraphDataset:
             labels.append(label_graphs)
         
         return sequences, labels
+    
+
+ 
