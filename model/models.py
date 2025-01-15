@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from STGCN.model import layers
 
 class STGCNChebGraphConv(nn.Module):
@@ -131,66 +131,6 @@ class STGCNChebGraphConvProjected(nn.Module):
         
         return x
 
-class STGCNChebGraphConvProjectedTemporalAttention(nn.Module):
-    def __init__(self, args, blocks, n_vertex):
-        super(STGCNChebGraphConvProjectedTemporalAttention, self).__init__()
-        modules = []
-        for l in range(len(blocks) - 3):
-            modules.append(layers.STConvBlock(args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1], 
-                                            args.act_func, args.graph_conv_type, args.gso, 
-                                            args.enable_bias, args.droprate))
-        self.st_blocks = nn.Sequential(*modules)
-        Ko = args.n_his - (len(blocks) - 3) * 2 * (args.Kt - 1)
-        self.Ko = Ko
-        
-        if self.Ko > 1:
-            self.output = layers.OutputBlock(Ko, blocks[-3][-1], blocks[-2], blocks[-1][0], 
-                                           n_vertex, args.act_func, args.enable_bias, args.droprate)
-        elif self.Ko == 0:
-            self.fc1 = nn.Linear(in_features=blocks[-3][-1], out_features=blocks[-2][0], 
-                                bias=args.enable_bias)
-            self.fc2 = nn.Linear(in_features=blocks[-2][0], out_features=blocks[-1][0], 
-                                bias=args.enable_bias)
-            self.relu = nn.ReLU()
-            self.dropout = nn.Dropout(p=args.droprate)
-        
-        # Temporal attention
-        self.temporal_attention = nn.Sequential(
-            nn.Linear(blocks[-1][0], 1),
-            nn.Softmax(dim=1)  # Apply softmax over time dimension
-        )
-        
-        # Expression projection
-        self.expression_proj = nn.Sequential(
-            nn.Linear(blocks[-1][0], 16),
-            nn.ReLU(),
-            nn.Linear(16, 1)
-        )
-
-    def forward(self, x):
-        # Original STGCN forward pass
-        x = self.st_blocks(x)
-        
-        if self.Ko > 1:
-            x = self.output(x)
-        elif self.Ko == 0:
-            x = self.fc1(x.permute(0, 2, 3, 1))
-            x = self.relu(x)
-            x = self.fc2(x).permute(0, 3, 1, 2)
-        
-        batch_size, features, time_steps, nodes = x.shape
-        
-        # Apply temporal attention
-        x_temp = x.permute(0, 3, 2, 1)  # [batch, nodes, time_steps, features]
-        attention_weights = self.temporal_attention(x_temp)  # [batch, nodes, time_steps, 1]
-        x_weighted = x_temp * attention_weights  # Apply attention weights
-        
-        # Project to expression values
-        x = self.expression_proj(x_weighted)  # [batch, nodes, time_steps, 1]
-        x = x.permute(0, 3, 2, 1)  # [batch, 1, time_steps, nodes]
-        
-        return x[:, :, -1:, :]  # Only return the last time step prediction
-
 class STGCNGraphConv(nn.Module):
     # STGCNGraphConv contains 'TGTND TGTND TNFF' structure
     # GraphConv is the graph convolution from GCN.
@@ -285,65 +225,57 @@ class STGCNGraphConvProjected(nn.Module):
         
         return x
 
-class STGCNGraphConvProjectedTemporalAttention(nn.Module):
-   
+class EnhancedSTGCNChebGraphConvProjected(nn.Module):
     def __init__(self, args, blocks, n_vertex):
-        super(STGCNGraphConvProjectedTemporalAttention, self).__init__()
+        super(EnhancedSTGCNChebGraphConvProjected, self).__init__()
+
         modules = []
         for l in range(len(blocks) - 3):
-            modules.append(layers.STConvBlock(args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1], 
-                                            args.act_func, args.graph_conv_type, args.gso, 
-                                            args.enable_bias, args.droprate))
+            modules.append(layers.STAttentionBlock(args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1], 
+                                          args.act_func, args.graph_conv_type, args.gso, 
+                                          args.enable_bias, args.droprate))
+        
         self.st_blocks = nn.Sequential(*modules)
+
         Ko = args.n_his - (len(blocks) - 3) * 2 * (args.Kt - 1)
         self.Ko = Ko
-        
+
         if self.Ko > 1:
             self.output = layers.OutputBlock(Ko, blocks[-3][-1], blocks[-2], blocks[-1][0], 
                                            n_vertex, args.act_func, args.enable_bias, args.droprate)
         elif self.Ko == 0:
-            self.fc1 = nn.Linear(in_features=blocks[-3][-1], out_features=blocks[-2][0], bias=args.enable_bias)
-            self.fc2 = nn.Linear(in_features=blocks[-2][0], out_features=blocks[-1][0], bias=args.enable_bias)
+            self.fc1 = nn.Linear(in_features=blocks[-3][-1], out_features=blocks[-2][0], 
+                                bias=args.enable_bias)
+            self.fc2 = nn.Linear(in_features=blocks[-2][0], out_features=blocks[-1][0], 
+                                bias=args.enable_bias)
             self.relu = nn.ReLU()
-            self.do = nn.Dropout(p=args.droprate)
-        
-        # Add temporal attention
-        self.temporal_attention = nn.Sequential(
-            nn.Linear(blocks[-1][0], blocks[-1][0] // 2),
-            nn.ReLU(),
-            nn.Linear(blocks[-1][0] // 2, 1),
-            nn.Softmax(dim=1)  # Apply softmax over time dimension
-        )
+            self.dropout = nn.Dropout(p=args.droprate)
         
         self.expression_proj = nn.Sequential(
-            nn.Linear(blocks[-1][0], 16),  # Wider first projection
-            nn.ReLU(),
-            nn.Linear(16, 8),            # Gradual reduction
-            nn.ReLU(),
-            nn.Linear(8, 1)              # Final projection
-        )
+        nn.Linear(blocks[-1][0], 16),  # Wider first projection
+        nn.ReLU(),
+        nn.Linear(16, 8),            # Gradual reduction
+        nn.ReLU(),
+        nn.Linear(8, 1)              # Final projection
+    )
+    
+    def forward(self,x):
 
-    def forward(self, x):
         x = self.st_blocks(x)
+
         if self.Ko > 1:
             x = self.output(x)
         elif self.Ko == 0:
             x = self.fc1(x.permute(0, 2, 3, 1))
             x = self.relu(x)
             x = self.fc2(x).permute(0, 3, 1, 2)
-        
+            
         batch_size, features, time_steps, nodes = x.shape
-        
-        # Apply temporal attention
-        x_temp = x.permute(0, 3, 2, 1)  # [batch, nodes, time_steps, features]
-        attention_weights = self.temporal_attention(x_temp)  # [batch, nodes, time_steps, 1]
-        x_weighted = x_temp * attention_weights  # Apply attention weights
-        
-        # Sum across time dimension to get time-aware features
-        x_weighted = torch.sum(x_weighted, dim=2)  # [batch, nodes, features]
-        
-        # Project to expression values
-        x = self.expression_proj(x_weighted)  # [batch, nodes, 1]
-        x = x.permute(0, 2, 1).unsqueeze(2)  # [batch, 1, 1, nodes]
+        x = x.permute(0, 2, 3, 1)  # [batch, time_steps, nodes, features]
+        x = self.expression_proj(x)  # [batch, time_steps, nodes, 1]
+        x = x.permute(0, 3, 1, 2)  # [batch, 1, time_steps, nodes]
         
         return x
+
+
+

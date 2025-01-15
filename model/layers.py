@@ -269,3 +269,65 @@ class OutputBlock(nn.Module):
         x = self.fc2(x).permute(0, 3, 1, 2)
 
         return x
+
+class TemporalSelfAttention(nn.Module):
+    def __init__(self, in_channels, n_vertex):
+        super(TemporalSelfAttention, self).__init__()
+        self.in_channels = in_channels
+        self.n_vertex = n_vertex
+
+        self.query = nn.Linear(in_channels, in_channels)
+        self.key = nn.Linear(in_channels, in_channels)
+        self.value = nn.Linear(in_channels, in_channels)
+
+        self.out_proj = nn.Linear(in_channels, in_channels)
+    
+    def forward(self, x):
+        batch_size, channels, time_steps, nodes = x.shape
+        x = x.permute(0, 3, 2, 1) # [batch_size, nodes, time_steps, channels]
+
+        # Q,K,V 
+        q = self.query(x) # [batch_size, nodes, time_steps, channels]
+        k = self.key(x) 
+        v = self.value(x)
+
+        # scale dot product 
+        scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.in_channels).float())
+        attention = F.softmax(scores, dim=-1)
+
+        # attention
+        out = torch.matmul(attention, v) # [batch_size, nodes, time_steps, channels]
+        out = self.out_proj(out)
+
+        # residual connection
+        out = out + x
+
+        out = out.permute(0,3,2,1) # [batch_size, nodes, time_steps, channels]
+        return out 
+
+class STAttentionBlock(nn.Module):
+    def __init__(self, Kt, Ks, n_vertex, last_block_channel, channels, act_func, graph_conv_type, gso, bias, droprate):
+        super(STAttentionBlock, self).__init__()
+
+        self.tmp_conv1 = TemporalConvLayer(Kt, last_block_channel, channels[0], n_vertex, act_func)
+        self.graph_conv = GraphConvLayer(graph_conv_type, channels[0], channels[1], Ks, gso, bias)
+        self.tmp_conv2 = TemporalConvLayer(Kt, channels[1], channels[2], n_vertex, act_func)
+
+        # temporal self-attention
+        self.temporal_attention = TemporalSelfAttention(channels[2], n_vertex)
+
+        self.tc2_ln = nn.LayerNorm([n_vertex, channels[2]], eps=1e-12)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(p=droprate)
+    
+    def forward(self, x):
+        x = self.tmp_conv1(x)
+        x = self.graph_conv(x)
+        x = self.relu(x)
+        x = self.tmp_conv2(x)
+
+        x = self.temporal_attention(x)
+
+        x = self.tc2_ln(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        x = self.dropout(x)
+        return x
