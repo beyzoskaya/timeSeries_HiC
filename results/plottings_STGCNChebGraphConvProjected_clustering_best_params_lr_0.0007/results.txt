@@ -1,0 +1,71 @@
+STGCNChebGraphConvProjected
+temporal_loss_for_projected_model --> alpha=0.6, gamma=0.4
+lr=0.0007, weight_decay = 1e-5
+
+self.Kt = 2 # temporal kernel size
+        self.Ks = 3  # spatial kernel size
+        self.n_his = 4  # historical sequence length
+        self.n_pred = 1
+       
+        self.blocks = [
+            [32, 32, 32],    # Input block
+            [32, 48, 48],    # Single ST block (since temporal dim reduces quickly)
+            [48, 32, 1]      # Output block
+        ]
+
+cluster_sim = 1.2 if gene_clusters[gene1] == gene_clusters[gene2] else 1.0
+weight = (hic_weight * 0.263912 +
+                        compartment_sim * 0.120981 +
+                        tad_sim * 0.05865 +
+                        ins_sim * 0.053658 +
+                        expr_sim * 0.44436) * cluster_sim
+--------------------------------------------------------------------------------------
+Model Performance Summary:
+
+Overall Metrics:
+MSE: 0.0023
+RMSE: 0.0479
+MAE: 0.0359
+R2_Score: 0.9514
+Pearson_Correlation: 0.9759
+
+Gene Performance:
+Mean Gene Correlation: 0.5583
+Best Performing Genes: Hist1h1b, Hist1h2ab, N-Cadherin, Shisa3, P-63
+
+Temporal Performance:
+Time-lagged Correlation: 0.7048
+DTW Distance: 0.2673
+Direction Accuracy: 0.6978
+Change Magnitude Ratio: 0.7493
+Predictions shape: (8, 52)
+Targets shape: (8, 52)
+
+Gene Analysis Summary:
+
+Top 5 Most Connected Genes:
+ABCA3: 6 connections, correlation: 0.2306
+AGER: 6 connections, correlation: 0.6947
+NME3: 6 connections, correlation: 0.7687
+RAGE: 6 connections, correlation: 0.5108
+tbp: 6 connections, correlation: 0.5271
+
+Top 5 Most Variable Genes:
+INMT: range 9.1897, correlation: 0.9109
+SFTP-D: range 6.8913, correlation: 0.6896
+Hist1h2ab: range 6.4284, correlation: 0.9471
+Tnc: range 5.3063, correlation: 0.9029
+Hist1h1b: range 5.0639, correlation: 0.9675
+
+Top 5 Best Predicted Genes:
+Hist1h1b: correlation 0.9675, connections: 4
+Hist1h2ab: correlation 0.9471, connections: 4
+N-Cadherin: correlation 0.9400, connections: 2
+Shisa3: correlation 0.9392, connections: 2
+P-63: correlation 0.9361, connections: 4
+
+Temporal Analysis:
+Best predicted time point: 0
+Worst predicted time point: 7
+Mean accuracy: 0.9761
+Std of accuracy: 0.0103
