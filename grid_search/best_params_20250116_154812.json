@@ -1,0 +1,21 @@
+{
+    "model_params": {
+        "Kt": 2,
+        "n_his": 4,
+        "droprate": 0.14012884093646305
+    },
+    "graph_params": {
+        "hic_weight": 0.2639126100363324,
+        "compartment_weight": 0.12098144531136364,
+        "tad_weight": 0.058655602516792915,
+        "ins_weight": 0.05365854695627287,
+        "expr_weight": 0.4443671029915904,
+        "cluster_sim_scale": 0.8045319790223231
+    },
+    "node2vec_params": {
+        "walk_length": 20,
+        "num_walks": 99,
+        "p": 1.7390234413511938,
+        "q": 1.6722832930051528
+    }
+}
