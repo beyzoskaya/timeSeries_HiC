@@ -32,7 +32,7 @@ def change_magnitude_loss(output, target, input_sequence, alpha=1.0, beta=0.5):
     
     return pred_loss + alpha * magnitude_loss + beta * underpredict_penalty
 
-def temporal_loss_for_projected_model(output, target, input_sequence, alpha=0.4, gamma=0.6):
+def temporal_loss_for_projected_model(output, target, input_sequence, alpha=0, gamma=0.4):
    
     mse_loss = F.mse_loss(output, target)
     
@@ -60,15 +60,71 @@ def temporal_loss_for_projected_model(output, target, input_sequence, alpha=0.4,
         
         return -torch.mean(torch.sum(pred_norm * target_norm, dim=1))
     
+    
     temp_loss = trend_correlation_loss(output_reshaped, target_reshaped, input_expressions)
     
     # Combine losses
-    total_loss = mse_loss + alpha * direction_loss + gamma * temp_loss
-    
+    total_loss = 0.6 * mse_loss + alpha * direction_loss + gamma * temp_loss
+   
     # Print components for monitoring
     print(f"\nLoss Components:")
     print(f"MSE Loss: {mse_loss.item():.4f}")
     print(f"Direction Loss: {direction_loss.item():.4f}")
     print(f"Temporal Loss: {temp_loss.item():.4f}")
+    
+    return total_loss
+
+def enhanced_temporal_loss(output, target, input_sequence, alpha=0.3, beta=0.3, gamma=0.4):
+    mse_loss = F.mse_loss(output, target)
+    
+    # Get expression values from input sequence
+    input_expressions = input_sequence[:, -1, :, :]  # [1, 3, 52]
+    last_input = input_expressions[:, -1:, :]  # [1, 1, 52]
+    
+    # Reshape output and target
+    output_reshaped = output.squeeze(1)  # [1, 1, 52]
+    target_reshaped = target.squeeze(1)  # [1, 1, 52]
+    
+    true_change = target_reshaped - last_input
+    pred_change = output_reshaped - last_input
+
+    direction_match = torch.sign(true_change) * torch.sign(pred_change)
+    magnitude_diff = torch.abs(torch.abs(pred_change) - torch.abs(true_change))
+    magnitude_weight = torch.exp(-magnitude_diff)  # More weight to similar magnitudes
+    
+    direction_loss = -torch.mean(direction_match * magnitude_weight)
+
+    def enhanced_trend_correlation(pred, target, sequence_expr):
+        pred_trend = torch.cat([sequence_expr, pred], dim=1)
+        target_trend = torch.cat([sequence_expr, target], dim=1)
+        
+        pred_norm = (pred_trend - pred_trend.mean(dim=1, keepdim=True)) / (pred_trend.std(dim=1, keepdim=True) + 1e-8)
+        target_norm = (target_trend - target_trend.mean(dim=1, keepdim=True)) / (target_trend.std(dim=1, keepdim=True) + 1e-8)
+
+        corr_loss = -torch.mean(torch.sum(pred_norm * target_norm, dim=1))
+        
+        pred_diff = torch.diff(pred_trend, dim=1)
+        target_diff = torch.diff(target_trend, dim=1)
+        smoothness_loss = F.mse_loss(pred_diff, target_diff)
+        
+        return corr_loss + 0.1 * smoothness_loss
+    
+    temporal_loss = enhanced_trend_correlation(output_reshaped, target_reshaped, input_expressions)
+    
+    last_sequence_val = input_expressions[:, -1, :]
+    consistency_loss = torch.mean(torch.abs(output_reshaped - last_sequence_val))
+    
+    total_loss = (
+        0.4 * mse_loss + 
+        alpha * direction_loss + 
+        beta * temporal_loss +
+        gamma * consistency_loss
+    )
+    
+    print(f"\nLoss Components:")
+    print(f"MSE Loss: {mse_loss.item():.4f}")
+    print(f"Direction Loss: {direction_loss.item():.4f}")
+    print(f"Temporal Loss: {temporal_loss.item():.4f}")
+    print(f"Consistency Loss: {consistency_loss.item():.4f}")
     
     return total_loss
