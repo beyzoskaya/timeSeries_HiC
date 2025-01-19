@@ -20,7 +20,7 @@ from STGCN.model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected, 
 import argparse
 from scipy.spatial.distance import cdist
 from create_graph_and_embeddings_STGCN import *
-from STGCN_losses import temporal_loss_for_projected_model, temporal_loss_for_projected_model_rolling_window
+from STGCN_losses import temporal_loss_for_projected_model
 from evaluation import *
 from sklearn.model_selection import TimeSeriesSplit
     
@@ -50,6 +50,29 @@ def rolling_window_split(sequences, labels, train_size, val_size, step=1):
         val_seq = sequences[i + train_size:i + train_size + val_size]
         val_lbl = labels[i + train_size:i + train_size + val_size]
         yield train_seq, train_lbl, val_seq, val_lbl
+    
+def filter_constant_genes(sequences, labels):
+    constant_genes = set()
+    for seq in sequences:
+        for t in seq:
+            expr_values = t.x[:, -1]  # Expression values are the last feature
+            if torch.all(expr_values == expr_values[0]):
+                constant_genes.update(torch.where(expr_values == expr_values[0])[0].tolist())
+    
+    if constant_genes:
+        print(f"Removing {len(constant_genes)} constant genes: {constant_genes}")
+        for seq in sequences:
+            for t in seq:
+                t.x = t.x[~torch.isin(torch.arange(t.x.size(0)), list(constant_genes))]
+        for lbl in labels:
+            for t in lbl:
+                t.x = t.x[~torch.isin(torch.arange(t.x.size(0)), list(constant_genes))]
+    
+    return sequences, labels
+
+def add_noise(data, noise_level=1e-4):
+    noise = torch.randn_like(data) * noise_level
+    return data + noise
 
 def train_stgcn(dataset, val_ratio=0.2, step=1):
     # ADDED FOR GRID SEARCH ARGS
@@ -62,6 +85,9 @@ def train_stgcn(dataset, val_ratio=0.2, step=1):
     # sequences with labels
     sequences, labels = dataset.get_temporal_sequences()
     print(f"\nCreated {len(sequences)} sequences")
+
+    sequences, labels = filter_constant_genes(sequences, labels)
+    sequences = [add_noise(seq) for seq in sequences]
 
     # calculate GSO
     edge_index = sequences[0][0].edge_index
@@ -125,7 +151,7 @@ def train_stgcn(dataset, val_ratio=0.2, step=1):
 
                 all_targets.append(target.detach().cpu().numpy())
                 all_outputs.append(output.detach().cpu().numpy())
-                loss = temporal_loss_for_projected_model_rolling_window(output[:, :, -1:, :], target, x)
+                loss = temporal_loss_for_projected_model(output[:, :, -1:, :], target, x)
 
                 if torch.isnan(loss):
                     print("NaN loss detected!")
@@ -145,7 +171,7 @@ def train_stgcn(dataset, val_ratio=0.2, step=1):
                 for seq, label in zip(val_sequences, val_labels):
                     x, target = process_batch(seq, label)
                     output = model(x)
-                    val_loss = temporal_loss_for_projected_model_rolling_window(output[:, :, -1:, :], target, x)
+                    val_loss = temporal_loss_for_projected_model(output[:, :, -1:, :], target, x)
                     val_loss_total += val_loss.item()
 
                     output_corr = calculate_correlation(output)
