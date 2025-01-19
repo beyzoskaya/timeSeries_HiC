@@ -44,6 +44,11 @@ def calculate_correlation(tensor):
     return torch.corrcoef(tensor)
 
 def rolling_window_split(sequences, labels, train_size, val_size, step=1):
+    num_splits = (len(sequences) - train_size - val_size) // step + 1
+    print(f"Total sequences: {len(sequences)}")
+    print(f"Training size: {train_size}, Validation size: {val_size}, Step: {step}")
+    print(f"Number of splits: {num_splits}")
+
     for i in range(0, len(sequences) - train_size - val_size + 1, step):
         train_seq = sequences[i:i + train_size]
         train_lbl = labels[i:i + train_size]
@@ -71,8 +76,9 @@ def filter_constant_genes(sequences, labels):
     return sequences, labels
 
 def add_noise(data, noise_level=1e-4):
-    noise = torch.randn_like(data) * noise_level
-    return data + noise
+    noise = torch.randn_like(data.x) * noise_level
+    data.x = data.x + noise
+    return data
 
 def train_stgcn(dataset, val_ratio=0.2, step=1):
     # ADDED FOR GRID SEARCH ARGS
@@ -86,8 +92,7 @@ def train_stgcn(dataset, val_ratio=0.2, step=1):
     sequences, labels = dataset.get_temporal_sequences()
     print(f"\nCreated {len(sequences)} sequences")
 
-    sequences, labels = filter_constant_genes(sequences, labels)
-    sequences = [add_noise(seq) for seq in sequences]
+    sequences = [[add_noise(graph) for graph in seq] for seq in sequences]
 
     # calculate GSO
     edge_index = sequences[0][0].edge_index
@@ -98,9 +103,11 @@ def train_stgcn(dataset, val_ratio=0.2, step=1):
     D = torch.diag(torch.sum(adj, dim=1) ** (-0.5))
     args.gso = torch.eye(args.n_vertex) - D @ adj @ D
 
-    # Define train and validation sizes
-    train_size = int(len(sequences) * (1 - val_ratio))  # e.g., 32
-    val_size = len(sequences) - train_size  # e.g., 8
+    criterion = nn.MSELoss()
+
+    train_size = int(len(sequences) * 0.8)  # 80% for training
+    val_size = len(sequences) - train_size  # 20% for validation
+    step = 1 
 
     # Use rolling window split
     splits = list(rolling_window_split(sequences, labels, train_size, val_size, step=step))
@@ -151,7 +158,7 @@ def train_stgcn(dataset, val_ratio=0.2, step=1):
 
                 all_targets.append(target.detach().cpu().numpy())
                 all_outputs.append(output.detach().cpu().numpy())
-                loss = temporal_loss_for_projected_model(output[:, :, -1:, :], target, x)
+                loss = criterion(output[:, :, -1:, :], target, x)
 
                 if torch.isnan(loss):
                     print("NaN loss detected!")
@@ -171,7 +178,7 @@ def train_stgcn(dataset, val_ratio=0.2, step=1):
                 for seq, label in zip(val_sequences, val_labels):
                     x, target = process_batch(seq, label)
                     output = model(x)
-                    val_loss = temporal_loss_for_projected_model(output[:, :, -1:, :], target, x)
+                    val_loss = criterion(output[:, :, -1:, :], target, x)
                     val_loss_total += val_loss.item()
 
                     output_corr = calculate_correlation(output)
