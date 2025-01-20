@@ -28,7 +28,9 @@ def clean_gene_name(gene_name):
     return gene_name.split('(')[0].strip()
 
 class TemporalGraphDataset:
-    def __init__(self, csv_file, embedding_dim=32, seq_len=5, pred_len=1): # I change the seq_len to more lower value
+    def __init__(self, csv_file, embedding_dim=32, seq_len=3, pred_len=1, graph_params=None, node2vec_params=None): # I change the seq_len to more lower value
+        #self.graph_params = graph_params or {}
+        #self.node2vec_params = node2vec_params or {}
         self.seq_len = seq_len
         self.pred_len = pred_len
         self.embedding_dim = embedding_dim
@@ -52,7 +54,9 @@ class TemporalGraphDataset:
         # Create base graph and features
         self.base_graph = self.create_base_graph()
         print("Base graph created")
-        self.node_features = self.create_temporal_node_features_several_graphs_created_clustering() # try with several graphs for time series consistency
+        #self.node_features = self.create_temporal_node_features_several_graphs_created_clustering() # try with several graphs for time series consistency
+        self.node_features, self.temporal_edge_indices, self.temporal_edge_attrs = \
+        self.create_temporal_node_features_several_graphs_created_clustering()
         print("Temporal node features created")
         
         # Get edge information
@@ -152,7 +156,7 @@ class TemporalGraphDataset:
                 G,
                 dimensions=self.embedding_dim,
                 walk_length=20,
-                num_walks=75,
+                num_walks=100,
                 p=1.0,
                 q=1.0,
                 workers=1,
@@ -205,9 +209,11 @@ class TemporalGraphDataset:
     
     def create_temporal_node_features_several_graphs_created_clustering(self):
         temporal_features = {}
-        
+        temporal_edge_indices = {}
+        temporal_edge_attrs = {}
+
         # First, get cluster information
-        clusters, _ = analyze_expression_levels(self)
+        clusters, _ = analyze_expression_levels_kmeans(self)
         gene_clusters = {}
         for cluster_name, genes in clusters.items():
             for gene in genes:
@@ -246,6 +252,8 @@ class TemporalGraphDataset:
             G.add_nodes_from(self.node_map.keys())
             
             # Add edges with cluster-aware weights
+            edge_index = []
+            edge_weights = []
             for _, row in self.df.iterrows():
                 gene1 = row['Gene1_clean']
                 gene2 = row['Gene2_clean']
@@ -260,26 +268,44 @@ class TemporalGraphDataset:
                 
                 # Add cluster similarity component
                 cluster_sim = 1.2 if gene_clusters[gene1] == gene_clusters[gene2] else 1.0
+
+                """
+                Original version for training
+                weight = (
+                hic_weight * self.graph_params.get('hic_weight', 0.3) +
+                compartment_sim * self.graph_params.get('compartment_weight', 0.1) +
+                tad_sim * self.graph_params.get('tad_weight', 0.05) +
+                ins_sim * self.graph_params.get('ins_weight', 0.05)
+            ) * cluster_sim
+                """
+                # weight = (hic_weight * 0.263912 +
+                #         compartment_sim * 0.120981 +
+                #         tad_sim * 0.05865 +
+                #         ins_sim * 0.053658 +
+                #         expr_sim * 0.44436) * cluster_sim
                 
-                # Combine weights with cluster influence
-                weight = (hic_weight * 0.25 +
-                        compartment_sim * 0.1 +
-                        tad_sim * 0.1 +
-                        ins_sim * 0.05 +
-                        expr_sim * 0.5) * cluster_sim
+                weight = (hic_weight * 0.3 +
+                          compartment_sim * 0.1 +
+                          tad_sim * 0.1 +
+                          ins_sim * 0.1 +
+                          expr_sim * 0.4) * cluster_sim
                 
                 G.add_edge(gene1, gene2, weight=weight)
+                i, j = self.node_map[gene1], self.node_map[gene2]
+                edge_index.extend([[i, j], [j, i]])
+                edge_weights.extend([weight, weight])
             
             # Create Node2Vec embeddings with cluster-aware weights
             node2vec = Node2Vec(
                 G,
                 dimensions=self.embedding_dim,
                 walk_length=20,
-                num_walks=150,
-                workers=1,
+                num_walks=100,
                 p=1.0,
                 q=1.0,
-                weight_key='weight',
+                #p=1.739023,
+                #q=1.6722,
+                workers=1,
                 seed=42
             )
             
@@ -304,13 +330,15 @@ class TemporalGraphDataset:
                 features.append(node_embedding)
             
             temporal_features[t] = torch.stack(features)
+            temporal_edge_indices[t] = torch.tensor(edge_index).t().contiguous()
+            temporal_edge_attrs[t] = torch.tensor(edge_weights, dtype=torch.float32).unsqueeze(1)
             
             # Print diagnostics
             print(f"\nFeature Statistics for time {t}:")
             print(f"Expression range: [{min(expression_values.values()):.4f}, {max(expression_values.values()):.4f}]")
             print(f"Embedding range: [{temporal_features[t].min():.4f}, {temporal_features[t].max():.4f}]")
             
-        return temporal_features
+        return temporal_features, temporal_edge_indices, temporal_edge_attrs
 
     def get_edge_index_and_attr(self):
         """Convert base graph to PyG format"""
@@ -332,8 +360,8 @@ class TemporalGraphDataset:
         """Create PyG graph for a specific time point"""
         return Data(
             x=self.node_features[time_point],
-            edge_index=self.edge_index,
-            edge_attr=self.edge_attr,
+            edge_index=self.temporal_edge_indices[time_point],
+            edge_attr=self.temporal_edge_attrs[time_point],
             num_nodes=self.num_nodes
         )
     
