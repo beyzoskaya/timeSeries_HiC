@@ -1,0 +1,66 @@
+STGCNChebGraphConvProjected with STConvBlockLSTM
+lr=0.0007, weight_decay=1e-5
+patience = 20
+self.Kt = 3 # temporal kernel size
+        self.Ks = 3  # spatial kernel size
+        self.n_his = 5  # historical sequence length
+        self.n_pred = 1
+       
+        self.blocks = [
+            [32, 32, 32],    # Input block
+            [32, 48, 48],    # Single ST block (since temporal dim reduces quickly)
+            [48, 32, 1]      # Output block
+        ]
+enhanced_temporal_loss with alpha=0.3, beta=0.3, gamma=0.4
+direction_loss = -torch.mean(direction_match * magnitude_weight) * 0.1
+temporal_loss = temporal_loss * 0.1
+-----------------------------------------------------------------------------------
+Model Performance Summary:
+
+Overall Metrics:
+MSE: 0.0014
+RMSE: 0.0377
+MAE: 0.0273
+R2_Score: 0.9704
+Pearson_Correlation: 0.9851
+
+Gene Performance:
+Mean Gene Correlation: 0.6153
+Best Performing Genes: INMT, ADAMTSL2, Dnmt3a, P-63, Hist1h1b
+
+Temporal Performance:
+Time-lagged Correlation: 0.6921
+DTW Distance: 0.2026
+Direction Accuracy: 0.7802
+Change Magnitude Ratio: 0.8528
+Predictions shape: (8, 52)
+Targets shape: (8, 52)
+
+Gene Analysis Summary:
+
+Top 5 Most Connected Genes:
+ABCA3: 6 connections, correlation: 0.3903
+AGER: 6 connections, correlation: 0.6135
+NME3: 6 connections, correlation: 0.4151
+RAGE: 6 connections, correlation: 0.2962
+tbp: 6 connections, correlation: 0.8954
+
+Top 5 Most Variable Genes:
+INMT: range 9.1897, correlation: 0.9875
+SFTP-D: range 6.8913, correlation: 0.1730
+Hist1h2ab: range 6.4284, correlation: 0.8829
+Tnc: range 5.3063, correlation: 0.9414
+Hist1h1b: range 5.0639, correlation: 0.9421
+
+Top 5 Best Predicted Genes:
+INMT: correlation 0.9875, connections: 3
+ADAMTSL2: correlation 0.9844, connections: 5
+Dnmt3a: correlation 0.9537, connections: 1
+P-63: correlation 0.9436, connections: 4
+Hist1h1b: correlation 0.9421, connections: 4
+
+Temporal Analysis:
+Best predicted time point: 7
+Worst predicted time point: 2
+Mean accuracy: 0.9853
+Std of accuracy: 0.0078
