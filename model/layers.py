@@ -253,6 +253,21 @@ class STConvBlock(nn.Module):
 
         return x 
 
+class FeatureFusionModule(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(channels * 2, channels),
+            nn.LayerNorm(channels),
+            nn.Sigmoid()
+        )
+    def forward(self, temporal_features, spatial_features):
+        # temporal_feat: features from LSTM (temporal information)
+        # spatial_feat: features from graph conv (spatial information)
+        combined = torch.cat([temporal_features, spatial_features], dim=1)
+        attention_weights = self.attention(combined)
+        return temporal_features * attention_weights + spatial_features * (1- attention_weights)
+
 class STConvBlockLSTM(nn.Module):
     def __init__(self, Kt, Ks, n_vertex, last_block_channel, channels, act_func, graph_conv_type, gso, bias, droprate):
         super(STConvBlockLSTM, self).__init__()
@@ -262,13 +277,16 @@ class STConvBlockLSTM(nn.Module):
         self.tmp_conv2 = TemporalConvLayer(Kt, channels[1], channels[2], n_vertex, act_func)
 
         self.lstm = nn.LSTM(
-            input_size=channels[2],  # Input feature size --> 32 embedding dim
-            hidden_size=channels[2], # Hidden state size
-            num_layers=1,            # Number of LSTM layers
-            batch_first=True         # Input shape: (batch, seq_len, features)
+            input_size=channels[2],
+            hidden_size=channels[2],
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+            dropout=droprate 
         )
-
+        
         self.tc2_ln = nn.LayerNorm([n_vertex, channels[2]], eps=1e-12)
+        self.relu = nn.ReLU()
         self.elu = nn.ELU()
         self.dropout = nn.Dropout(p=droprate)
     
@@ -293,6 +311,57 @@ class STConvBlockLSTM(nn.Module):
 
         x = self.tc2_ln(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
     
+        x = self.dropout(x)
+        
+        return x
+
+class STConvBlockLSTMFusionModule(nn.Module):
+    def __init__(self, Kt, Ks, n_vertex, last_block_channel, channels, act_func, graph_conv_type, gso, bias, droprate):
+        super(STConvBlockLSTMFusionModule, self).__init__()
+        self.gso = gso
+
+        self.tmp_conv1 = TemporalConvLayer(Kt, last_block_channel, channels[0], n_vertex, act_func)
+        self.graph_conv = GraphConvLayer(graph_conv_type, channels[0], channels[1], Ks, gso, bias)
+        self.tmp_conv2 = TemporalConvLayer(Kt, channels[1], channels[2], n_vertex, act_func)
+
+        self.lstm = nn.LSTM(
+            input_size=channels[2],
+            hidden_size=channels[2],
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+            dropout=droprate 
+        )
+        
+        self.fusion = FeatureFusionModule(channels[2])
+        
+        self.spatial_proj = nn.Linear(channels[1], channels[2])
+        
+        self.tc2_ln = nn.LayerNorm([n_vertex, channels[2]], eps=1e-12)
+        self.elu = nn.ELU()
+        self.dropout = nn.Dropout(p=droprate)
+    
+    def forward(self, x):
+        x = self.tmp_conv1(x)
+        
+        spatial_features = self.graph_conv(x)
+        x = self.elu(spatial_features)
+        
+        spatial_skip = self.spatial_proj(spatial_features.permute(0, 2, 3, 1))
+        
+        x = self.tmp_conv2(x)
+        
+        batch_size, features, seq_len, nodes = x.shape
+        x = x.permute(0, 2, 3, 1)  # [batch, seq_len, nodes, features]
+        x = x.reshape(batch_size * nodes, seq_len, features)
+        
+        x, _ = self.lstm(x)
+    
+        x = x.reshape(batch_size, nodes, seq_len, features)
+        x = self.fusion(x, spatial_skip)  # Fuse temporal and spatial
+        
+        x = x.permute(0, 3, 2, 1)  # [batch, features, seq_len, nodes]
+        x = self.tc2_ln(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         x = self.dropout(x)
         
         return x
