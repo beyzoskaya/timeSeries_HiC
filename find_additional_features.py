@@ -1,8 +1,10 @@
 import numpy as np
 import pandas as pd
-from scipy import sparse
 from scipy.sparse.linalg import eigsh
 from scipy.signal import find_peaks
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def create_hic_matrix(hic_file, max_bin=None):
     """
@@ -25,7 +27,7 @@ def create_hic_matrix(hic_file, max_bin=None):
     
     return matrix
 
-def calculate_ab_compartments(hic_matrix):
+def calculate_ab_compartments(hic_matrix, chrom):
     """
     Calculate A/B compartments using eigenvector decomposition
     """
@@ -38,7 +40,8 @@ def calculate_ab_compartments(hic_matrix):
     try:
         eigenvalues, eigenvectors = eigsh(norm_matrix, k=1, which='LM')
         compartment_eigenvector = eigenvectors[:, 0]
-    except:
+    except Exception as e:
+        logging.warning(f"Eigenvector decomposition failed for chromosome {chrom}: {str(e)}")
         compartment_eigenvector = np.zeros(len(hic_matrix))
     
     compartments = {}
@@ -54,6 +57,10 @@ def calculate_insulation_score(hic_matrix, window_size=5):
     """
     hic_matrix = np.array(hic_matrix, dtype=float)
     n = len(hic_matrix)
+    
+    if window_size >= n:
+        raise ValueError("Window size must be smaller than the matrix dimensions.")
+    
     insulation_scores = np.zeros(n)
     
     for i in range(window_size, n - window_size):
@@ -63,8 +70,15 @@ def calculate_insulation_score(hic_matrix, window_size=5):
     insulation_scores = (insulation_scores - np.mean(insulation_scores)) / np.std(insulation_scores)
     return insulation_scores
 
+def detect_tad_boundaries(insulation_scores, min_distance=5):
+    """
+    Detect TAD boundaries from insulation scores
+    """
+    insulation_scores = np.nan_to_num(insulation_scores, nan=0.0, posinf=0.0, neginf=0.0)
+    boundaries, _ = find_peaks(-insulation_scores, distance=min_distance)
+    return boundaries
+
 def process_chromosome_features(input_file, hic_files_dict, output_file):
-    
     df = pd.read_csv(input_file)
     
     df['Gene1_Compartment'] = 'Unknown'
@@ -75,16 +89,16 @@ def process_chromosome_features(input_file, hic_files_dict, output_file):
     df['Gene2_TAD_Boundary_Distance'] = 0.0
     
     for chrom in hic_files_dict.keys():
-        print(f"Processing chromosome {chrom}...")
+        logging.info(f"Processing chromosome {chrom}...")
         
         hic_matrix = create_hic_matrix(hic_files_dict[chrom])
         
-        if len(hic_matrix) == 0:
-            print(f"Warning: Empty matrix for chromosome {chrom}")
+        if hic_matrix.shape[0] == 0 or hic_matrix.shape[0] != hic_matrix.shape[1]:
+            logging.warning(f"Invalid matrix shape for chromosome {chrom}")
             continue
             
         try:
-            compartments = calculate_ab_compartments(hic_matrix)
+            compartments = calculate_ab_compartments(hic_matrix, chrom)
             insulation_scores = calculate_insulation_score(hic_matrix)
             tad_boundaries = detect_tad_boundaries(insulation_scores)
             
@@ -111,23 +125,17 @@ def process_chromosome_features(input_file, hic_files_dict, output_file):
                     df.loc[idx, 'Gene2_TAD_Boundary_Distance'] = dist2
                     
         except Exception as e:
-            print(f"Error processing chromosome {chrom}: {str(e)}")
+            logging.error(f"Error processing chromosome {chrom}: {str(e)}")
             continue
     
     df.to_csv(output_file, index=False)
-    print(f"Enhanced data saved to {output_file}")
+    logging.info(f"Enhanced data saved to {output_file}")
     return df
 
-def detect_tad_boundaries(insulation_scores, min_distance=5):
-    """
-    Detect TAD boundaries from insulation scores
-    """
-    boundaries, _ = find_peaks(-insulation_scores, distance=min_distance)
-    return boundaries
 
 if __name__ == "__main__":
     input_file = "mapped/complete_genome_mapping.csv"
-    output_file = "mapped/enhanced_interactions.csv"
+    output_file = "mapped/enhanced_interactions_new.csv"
     
     hic_files_dict = {
         "1": "mESC_1mb_converted/HindIII_mESC.nor.chr1_1mb_contact_map.txt",
