@@ -16,12 +16,13 @@ from STGCN.model.models import *
 import sys
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 sys.path.append('./STGCN')
-from STGCN.model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected, STGCNGraphConv, STGCNGraphConvProjected
+from STGCN.model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected, STGCNGraphConv, STGCNGraphConvProjected, EnhancedSTGCNChebGraphConvProjected
 import argparse
 from scipy.spatial.distance import cdist
 from create_graph_and_embeddings_STGCN import *
-from STGCN_losses import temporal_loss_for_projected_model
+from STGCN_losses import temporal_loss_for_projected_model, enhanced_temporal_loss, gene_specific_loss
 from evaluation import *
+from sklearn.model_selection import TimeSeriesSplit
     
 def process_batch(seq, label):
     """Process batch data for training."""
@@ -37,13 +38,32 @@ def process_batch(seq, label):
 
 def calculate_correlation(tensor):
     # tensor shape: [batch, channels, time, nodes]
-    # Reshape to 2D for correlation
-    tensor = tensor.squeeze(0) # remove batch
-    tensor = tensor.view(tensor.size(0), -1) # [channels, time*nodes]
+    tensor = tensor.squeeze(0)  # remove batch
+    tensor = tensor.view(tensor.size(0), -1)  # [channels, time*nodes]
+    
+    # Check if any row is constant
+    is_constant = torch.all(tensor == tensor[:, :1], dim=1)
+    if torch.any(is_constant):
+        print("Warning: Constant input detected. Skipping correlation calculation.")
+        return torch.zeros(tensor.size(0), tensor.size(0))  # Return a zero matrix
+    
     return torch.corrcoef(tensor)
 
-def train_stgcn(dataset, val_ratio=0.2):
+def compute_gene_correlations(dataset):
+    sequences, labels = dataset.get_temporal_sequences()
+    all_targets = []
 
+    for seq, label in zip(sequences, labels):
+        _, target = process_batch(seq, label)
+        all_targets.append(target.squeeze().cpu().numpy())
+    
+    targets = np.stack(all_targets, axis=0)
+    gene_correlations = np.array([np.corrcoef(targets[:, i], targets[:, i])[0, 1] for i in range(targets.shape[1])])
+    return torch.tensor(gene_correlations, dtype=torch.float32)
+
+def train_stgcn(dataset,val_ratio=0.2):
+    # ADDED FOR GRID SEARCH ARGS
+    #if args is None: 
     args = Args()
     args.n_vertex = dataset.num_nodes
 
@@ -73,11 +93,9 @@ def train_stgcn(dataset, val_ratio=0.2):
     train_labels = labels[:n_train]
     val_sequences = sequences[n_train:]
     val_labels = labels[n_train:]
+    """   
 
-    print(f"\nData Split:")
-    print(f"Training sequences: {len(train_sequences)}")
-    print(f"Validation sequences: {len(val_sequences)}")
-    """
+    torch.manual_seed(42)
     # Random split
     n_samples = len(sequences)
     n_train = int(n_samples * (1 - val_ratio))
@@ -88,22 +106,35 @@ def train_stgcn(dataset, val_ratio=0.2):
     train_labels = [labels[i] for i in train_idx]
     val_sequences = [sequences[i] for i in val_idx]
     val_labels = [labels[i] for i in val_idx]
+    
+    
+    with open('plottings_STGCN/split_indices.txt', 'w') as f:
+        f.write("Train Indices:\n")
+        f.write(", ".join(map(str, train_idx)) + "\n")
+        f.write("\nValidation Indices:\n")
+        f.write(", ".join(map(str, val_idx)) + "\n")
+
+    print(f"\nData Split:")
+    print(f"Training sequences: {len(sequences)}")
+    print(f"Validation sequences: {len(val_sequences)}")
+
 
     print("\n=== Training Data Statistics ===")
-    print(f"Number of training sequences: {len(train_sequences)}")
+    print(f"Number of training sequences: {len(sequences)}")
     print(f"Number of validation sequences: {len(val_sequences)}")
     
     # Initialize STGCN
-    model = STGCNGraphConvProjected(args, args.blocks, args.n_vertex)
+    model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
     model = model.float() # convert model to float otherwise I am getting type error
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)
+    optimizer = optim.Adam(model.parameters(), lr=0.0007)
     #criterion = nn.MSELoss()
-    #criterion = temporal_loss_for_projected_model
+
+    gene_correlations = compute_gene_correlations(dataset)
 
     num_epochs = 100
     best_val_loss = float('inf')
-    patience = 10
+    patience = 15
     patience_counter = 0
     save_dir = 'plottings_STGCN'
     os.makedirs(save_dir, exist_ok=True)
@@ -145,11 +176,18 @@ def train_stgcn(dataset, val_ratio=0.2):
             all_targets.append(target.detach().cpu().numpy())
             all_outputs.append(output.detach().cpu().numpy())
             #loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
-            loss = temporal_loss_for_projected_model(
+            #loss = enhanced_temporal_loss(
+            #    output[:, :, -1:, :],
+            #    target,
+            #    x
+            #)
+            loss = gene_specific_loss(
                 output[:, :, -1:, :],
                 target,
-                x
-            )
+                x,
+                gene_correlations=gene_correlations 
+                )
+            #loss = criterion(output[:, :, -1:, :], target)
             if torch.isnan(loss):
                 print("NaN loss detected!")
                 print(f"Output range: [{output.min().item():.4f}, {output.max().item():.4f}]")
@@ -159,18 +197,6 @@ def train_stgcn(dataset, val_ratio=0.2):
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-
-        # if epoch % 10 == 0:
-        #         with torch.no_grad():
-        #             mse = F.mse_loss(output, target)
-        #             dir_loss = criterion(output, target, alpha=1, beta=0, gamma=0) - mse
-        #             mag_loss = criterion(output, target, alpha=0, beta=1, gamma=0) - mse
-        #             temp_loss = criterion(output, target, alpha=0, beta=0, gamma=1) - mse
-        #             print(f"\nLoss Components:")
-        #             print(f"MSE: {mse.item():.4f}")
-        #             print(f"Direction: {dir_loss.item():.4f}")
-        #             print(f"Magnitude: {mag_loss.item():.4f}")
-        #             print(f"Temporal: {temp_loss.item():.4f}")
 
         model.eval()
         val_loss = 0
@@ -191,8 +217,14 @@ def train_stgcn(dataset, val_ratio=0.2):
                 #print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
                 #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
-                #val_loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
-                val_loss = temporal_loss_for_projected_model(output[:, :, -1:, :], target, x)
+                #val_loss = criterion(output[:, :, -1:, :], target)
+                #val_loss = enhanced_temporal_loss(output[:, :, -1:, :], target, x)
+                val_loss = gene_specific_loss(
+                    output[:, :, -1:, :],
+                    target,
+                    x,
+                    gene_correlations=gene_correlations 
+                )
                 val_loss_total += val_loss.item()
 
                 output_corr = calculate_correlation(output)
@@ -251,7 +283,7 @@ def train_stgcn(dataset, val_ratio=0.2):
     #plt.savefig(f'{save_dir}/training_progress.png')
     plt.close()
     
-    return model, val_sequences, val_labels, train_losses, val_losses  
+    return model, val_sequences, val_labels, train_losses, val_losses, train_sequences, train_labels  
 
 def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCN'):
 
@@ -528,6 +560,69 @@ def create_evaluation_plots(predictions, targets, dataset, save_dir):
     # 3. Gene temporal patterns for all genes
     create_gene_temporal_plots(predictions, targets, dataset, save_dir)
 
+def plot_gene_predictions_train_val(model, train_sequences, train_labels, val_sequences, val_labels, dataset, save_dir='plottings_STGCN', genes_per_page=12):
+
+    os.makedirs(save_dir, exist_ok=True)
+    model.eval()
+    
+    all_sequences = train_sequences + val_sequences
+    all_labels = train_labels + val_labels
+    
+    num_genes = dataset.num_nodes
+    
+    all_predictions = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for seq, label in zip(all_sequences, all_labels):
+            x, target = process_batch(seq, label)
+            output = model(x)
+            
+            output = output[:, :, -1:, :].squeeze().cpu().numpy() 
+            target = target.squeeze().cpu().numpy()  
+            
+            all_predictions.append(output)
+            all_targets.append(target)
+    
+    predictions = np.array(all_predictions)  # [time_points, nodes]
+    targets = np.array(all_targets)          # [time_points, nodes]
+    
+    gene_names = list(dataset.node_map.keys())
+    
+    num_pages = (num_genes + genes_per_page - 1) // genes_per_page
+
+    for page in range(num_pages):
+        plt.figure(figsize=(20, 15))  
+        
+        start_idx = page * genes_per_page
+        end_idx = min((page + 1) * genes_per_page, num_genes)
+        page_genes = gene_names[start_idx:end_idx]
+        
+        for i, gene_name in enumerate(page_genes):
+            gene_idx = start_idx + i
+            
+            rows = (genes_per_page + 1) // 2  
+            plt.subplot(rows, 2, i + 1) 
+        
+            train_time_points = range(len(train_labels))
+            plt.plot(train_time_points, targets[:len(train_labels), gene_idx], label='Train Actual', color='blue', marker='o')
+            
+            plt.plot(train_time_points, predictions[:len(train_labels), gene_idx], label='Train Predicted', color='red', linestyle='--', marker='x')
+     
+            val_time_points = range(len(train_labels), len(train_labels) + len(val_labels))
+            plt.plot(val_time_points, targets[len(train_labels):, gene_idx], label='Val Actual', color='green', marker='o')
+            
+            plt.plot(val_time_points, predictions[len(train_labels):, gene_idx], label='Val Predicted', color='orange', linestyle='--', marker='x')
+            
+            plt.title(f'Gene: {gene_name}')
+            plt.xlabel('Time Points')
+            plt.ylabel('Expression Value')
+            plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(f'{save_dir}/gene_predictions_page_{page + 1}.png')
+        plt.close()
+
 def get_predictions_and_targets(model, val_sequences, val_labels):
     """Extract predictions and targets from validation data."""
     model.eval()
@@ -678,32 +773,33 @@ def analyze_temporal_patterns(dataset, predictions, targets):
 
 class Args:
     def __init__(self):
-        self.Kt = 3  # temporal kernel size
+        self.Kt = 3 # temporal kernel size
         self.Ks = 3  # spatial kernel size
-        self.n_his = 5  # historical sequence length
+        self.n_his = 3  # historical sequence length
         self.n_pred = 1
-        # Modified block structure with fewer ST blocks
+       
         self.blocks = [
-            [32, 32, 32],    # Input block
-            [32, 32, 32],    # Single ST block (since temporal dim reduces quickly)
-            [32, 32, 1]      # Output block
+            [16, 16, 16],  # Input block
+            [16, 8, 8],     # Single ST block
+            [8, 16, 1]      # Output block
         ]
         self.act_func = 'glu'
-        self.graph_conv_type = 'graph_conv'
+        self.graph_conv_type = 'cheb_graph_conv'
         self.enable_bias = True
-        self.droprate = 0
+        self.droprate = 0.1
 
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
-        csv_file='mapped/enhanced_interactions.csv',
-        embedding_dim=32,
+        csv_file='mapped/enhanced_interactions_new.csv',
+        embedding_dim=16,
         seq_len=3,
         pred_len=1
     )
-    
-    model, val_sequences,val_labels, train_losses, val_losses = train_stgcn(dataset, val_ratio=0.2)
+
+    model, val_sequences, val_labels, train_losses, val_losses, train_sequences, train_labels = train_stgcn(dataset, val_ratio=0.2)
     
     metrics = evaluate_model_performance(model, val_sequences, val_labels, dataset)
+    plot_gene_predictions_train_val(model, train_sequences, train_labels, val_sequences, val_labels, dataset)
 
     print("\nModel Performance Summary:")
     print("\nOverall Metrics:")
