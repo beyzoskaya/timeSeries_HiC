@@ -36,29 +36,26 @@ def process_batch(seq, label):
     
     return x, target
 
-def calculate_correlation(tensor):
-    # tensor shape: [batch, channels, time, nodes]
-    tensor = tensor.squeeze(0)  # remove batch
-    tensor = tensor.view(tensor.size(0), -1)  # [channels, time*nodes]
-    
-    # Check if any row is constant
-    is_constant = torch.all(tensor == tensor[:, :1], dim=1)
-    if torch.any(is_constant):
-        print("Warning: Constant input detected. Skipping correlation calculation.")
-        return torch.zeros(tensor.size(0), tensor.size(0))  # Return a zero matrix
-    
-    return torch.corrcoef(tensor)
-
-def compute_gene_correlations(dataset):
+def compute_gene_correlations(dataset, model):
     sequences, labels = dataset.get_temporal_sequences()
     all_targets = []
+    all_predictions = []
 
-    for seq, label in zip(sequences, labels):
-        _, target = process_batch(seq, label)
-        all_targets.append(target.squeeze().cpu().numpy())
-    
-    targets = np.stack(all_targets, axis=0)
-    gene_correlations = np.array([np.corrcoef(targets[:, i], targets[:, i])[0, 1] for i in range(targets.shape[1])])
+    model.eval()
+    with torch.no_grad():
+        for seq, label in zip(sequences, labels):
+            x, target = process_batch(seq, label)
+            output = model(x)
+            all_targets.append(target.squeeze().cpu().numpy())  # [nodes]
+            all_predictions.append(output[:, :, -1, :].squeeze().cpu().numpy())  # Use last time step pred length is 1
+
+    targets = np.stack(all_targets, axis=0)  # [time_points, nodes]
+    predictions = np.stack(all_predictions, axis=0)  # [time_points, nodes]
+
+    print("Targets Shape gene correl:", targets.shape)
+    print("Predictions Shape gene correl:", predictions.shape)
+
+    gene_correlations = np.array([np.corrcoef(predictions[:, i], targets[:, i])[0, 1] for i in range(targets.shape[1])])
     return torch.tensor(gene_correlations, dtype=torch.float32)
 
 def train_stgcn(dataset,val_ratio=0.2):
@@ -130,7 +127,11 @@ def train_stgcn(dataset,val_ratio=0.2):
     optimizer = optim.Adam(model.parameters(), lr=0.0007)
     #criterion = nn.MSELoss()
 
-    gene_correlations = compute_gene_correlations(dataset)
+    gene_correlations = compute_gene_correlations(dataset, model)
+    print("Gene Correlations:", gene_correlations)
+    print("Min Correlation:", gene_correlations.min().item())
+    print("Max Correlation:", gene_correlations.max().item())
+    print("Mean Correlation:", gene_correlations.mean().item())
 
     num_epochs = 100
     best_val_loss = float('inf')
@@ -781,7 +782,7 @@ class Args:
         self.blocks = [
             [16, 16, 16],  # Input block
             [16, 8, 8],     # Single ST block
-            [8, 16, 1]      # Output block
+            [8, 8, 1]      # Output block
         ]
         self.act_func = 'glu'
         self.graph_conv_type = 'cheb_graph_conv'
