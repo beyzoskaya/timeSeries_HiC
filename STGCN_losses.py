@@ -138,15 +138,32 @@ def enhanced_temporal_loss(output, target, input_sequence, alpha=0.2, beta=0.2, 
     return total_loss
 
 def gene_specific_loss(output, target, input_sequence, gene_correlations=None, alpha=0.2, beta=0.2, gamma=0.3):
+
+    output = output[:, :, -1, :]  # [batch_size, 1, nodes]
+    target = target[:, :, -1, :]  # [batch_size, 1, nodes]s
     mse_loss = F.mse_loss(output, target)
     
     if gene_correlations is not None:
-        gene_mse_loss = F.mse_loss(output, target, reduction='none').mean(dim=(0, 1, 2))  # [nodes]
+        gene_mse_loss = F.mse_loss(output, target, reduction='none').mean(dim=(0, 1))  # [nodes]
+
+        #print("Gene-wise MSE Loss:", gene_mse_loss)
+        #print("Min Gene-wise MSE:", gene_mse_loss.min().item())
+        #print("Max Gene-wise MSE:", gene_mse_loss.max().item())
+        #print("Mean Gene-wise MSE:", gene_mse_loss.mean().item())
         
-        gene_weights = 1.0 / (gene_correlations + 1e-8)
-        gene_weights = gene_weights / gene_weights.sum()  
+        gene_weights = 1.0 / (gene_correlations**2 + 1e-8)
+        gene_weights = gene_weights / gene_weights.sum()
+
+        #print("Gene Weights:", gene_weights)
+        #print("Min Weight:", gene_weights.min().item())
+        #print("Max Weight:", gene_weights.max().item())
+        #print("Mean Weight:", gene_weights.mean().item())
+
         gene_specific_loss = (gene_mse_loss * gene_weights).mean()
+        gene_specific_loss = gene_specific_loss * 10
+        #print("Gene-Specific Loss:", gene_specific_loss.item())
     else:
+        #print(f"I'm inside gene correl is None")
         gene_specific_loss = 0.0
 
     input_expressions = input_sequence[:, -1, :, :]  # [1, 3, 52]
@@ -166,6 +183,10 @@ def gene_specific_loss(output, target, input_sequence, gene_correlations=None, a
     direction_loss = direction_loss * 0.1
 
     def enhanced_trend_correlation(pred, target, sequence_expr):
+        pred = pred.unsqueeze(1)  # [1, 1, 52]
+        target = target.unsqueeze(1)
+        #print(f"Shape of pred inside enhanced trend correl: {pred.shape}")
+        #print(f"Shape of target inside enhanced trend correl: {pred.shape}")
         pred_trend = torch.cat([sequence_expr, pred], dim=1)
         target_trend = torch.cat([sequence_expr, target], dim=1)
 
