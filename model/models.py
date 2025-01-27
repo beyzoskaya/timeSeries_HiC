@@ -151,7 +151,8 @@ class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
     def __init__(self, args, blocks, n_vertex, gene_connections):
         super(STGCNChebGraphConvProjectedGeneConnectedAttention, self).__init__()
         
-        connections = torch.tensor([gene_connections.get(i, 0) for i in range(n_vertex)])
+        connections = torch.tensor([gene_connections.get(i, 0) for i in range(n_vertex)], 
+                                 dtype=torch.float32)  # not implemented for Long error
         self.connection_weights = F.softmax(connections, dim=0)
         
         modules = []
