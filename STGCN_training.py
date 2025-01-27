@@ -125,7 +125,7 @@ def train_stgcn(dataset,val_ratio=0.2):
     model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
     model = model.float() # convert model to float otherwise I am getting type error
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0007, weight_decay=1e-5)
+    optimizer = optim.Adam(model.parameters(), lr=0.0007)
     #criterion = nn.MSELoss()
 
     gene_correlations = compute_gene_correlations(dataset, model)
@@ -289,9 +289,12 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
     args = Args()
     args.n_vertex = dataset.num_nodes
 
+    # Get gene clusters for train high expression genes first
     clusters, gene_expressions = analyze_expression_levels_kmeans(dataset)
+    
     sequences, labels = dataset.get_temporal_sequences()
 
+    # GSO calculation
     edge_index = sequences[0][0].edge_index
     edge_weight = sequences[0][0].edge_attr.squeeze() if sequences[0][0].edge_attr is not None else None
     adj = torch.zeros((args.n_vertex, args.n_vertex))
@@ -304,13 +307,18 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
     indices = torch.randperm(n_samples)
     train_idx = indices[:n_train]
     val_idx = indices[n_train:]
+    
+    val_sequences = [sequences[i] for i in val_idx]
+    val_labels = [labels[i] for i in val_idx]
+    all_train_sequences = [sequences[i] for i in train_idx]
+    all_train_labels = [labels[i] for i in train_idx]
 
     model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
     model = model.float()
     optimizer = optim.Adam(model.parameters(), lr=0.0007, weight_decay=1e-5)
 
     num_epochs = 100
-    curriculum_epochs = 30 
+    curriculum_epochs = 15
     best_val_loss = float('inf')
     patience = 15
     patience_counter = 0
@@ -336,12 +344,11 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
 
         current_train_sequences = []
         current_train_labels = []
-        for idx in train_idx:
-            seq = sequences[idx]
-            label = labels[idx]
+        for seq, label in zip(all_train_sequences, all_train_labels):
             if any(gene in current_genes for gene in dataset.node_map.keys()):
                 current_train_sequences.append(seq)
                 current_train_labels.append(label)
+
         for seq, label in zip(current_train_sequences, current_train_labels):
             optimizer.zero_grad()
             x, target = process_batch(seq, label)
@@ -352,6 +359,13 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
                 target,
                 x
             )
+
+            if torch.isnan(loss):
+                print("NaN loss detected!")
+                print(f"Output range: [{output.min().item():.4f}, {output.max().item():.4f}]")
+                print(f"Target range: [{target.min().item():.4f}, {target.max().item():.4f}]")
+                continue
+
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -365,15 +379,19 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
                 val_loss = enhanced_temporal_loss(output[:, :, -1:, :], target, x)
                 val_loss_total += val_loss.item()
 
-        avg_train_loss = total_loss / len(current_train_sequences)
+        if len(current_train_sequences) > 0: 
+            avg_train_loss = total_loss / len(current_train_sequences)
+        else:
+            avg_train_loss = float('inf')
+            
         avg_val_loss = val_loss_total / len(val_sequences)
-
         train_losses.append(avg_train_loss)
         val_losses.append(avg_val_loss)
+
         print(f'Training Loss: {avg_train_loss:.4f}')
         print(f'Validation Loss: {avg_val_loss:.4f}')
 
-        # Early stopping 
+        # Early stopping
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
@@ -388,7 +406,7 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
             if patience_counter >= patience:
                 print("Early stopping triggered.")
                 break
-    
+
     checkpoint = torch.load(f'{save_dir}/best_model.pth', weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
 
@@ -406,7 +424,7 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
     plt.savefig(f'{save_dir}/training_progress.png')
     plt.close()
 
-    return model, val_sequences, val_labels, train_losses, val_losses, train_sequences, train_labels
+    return model, val_sequences, val_labels, train_losses, val_losses, all_train_sequences, all_train_labels
 
 def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCN'):
 
@@ -908,8 +926,8 @@ class Args:
        
         self.blocks = [
             [16, 16, 16],  # Input block
-            [16, 16, 16],     # Single ST block
-            [16, 8, 1]      # Output block
+            [16, 16, 16],  # Single ST block
+            [16, 8, 1]     # Output block
         ]
     
         self.act_func = 'glu'
