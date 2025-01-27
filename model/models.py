@@ -147,11 +147,13 @@ class STGCNChebGraphConvProjected(nn.Module):
         
         return x 
 
-class STGCNChebGraphConvProjectedEmbeddingAdded(nn.Module):
-    def __init__(self, args, blocks, n_vertex):
-        super(STGCNChebGraphConvProjectedEmbeddingAdded, self).__init__()
-
-        self.gene_embedding = nn.Embedding(n_vertex, 32) # embedding for each gene
+class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
+    def __init__(self, args, blocks, n_vertex, gene_connections):
+        super(STGCNChebGraphConvProjectedGeneConnectedAttention, self).__init__()
+        
+        connections = torch.tensor([gene_connections.get(i, 0) for i in range(n_vertex)])
+        self.connection_weights = F.softmax(connections, dim=0)
+        
         modules = []
         for l in range(len(blocks) - 3):
             modules.append(layers.STConvBlockLSTM(args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1], 
@@ -160,6 +162,16 @@ class STGCNChebGraphConvProjectedEmbeddingAdded(nn.Module):
         self.st_blocks = nn.Sequential(*modules)
         Ko = args.n_his - (len(blocks) - 3) * 2 * (args.Kt - 1)
         self.Ko = Ko
+
+        self.connectivity_attention = nn.Sequential(
+            nn.Linear(blocks[-1][0], blocks[-1][0] // 2),
+            nn.LayerNorm(blocks[-1][0] // 2),
+            nn.ELU(),
+            nn.Linear(blocks[-1][0] // 2, 1),
+            nn.Sigmoid()
+        )
+        
+        self.attention_scale = nn.Parameter(torch.tensor(0.1))
 
         if self.Ko > 1:
             self.output = layers.OutputBlock(Ko, blocks[-3][-1], blocks[-2], blocks[-1][0], 
@@ -173,29 +185,20 @@ class STGCNChebGraphConvProjectedEmbeddingAdded(nn.Module):
             self.elu = nn.ELU()
             self.dropout = nn.Dropout(p=args.droprate)
         
-        self.gene_attention = nn.Sequential(
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1),
-            nn.Sigmoid()
-        )
-
         self.expression_proj = nn.Sequential(
-            nn.Linear(blocks[-1][0] + 32, 32),  # gene embedding dimension
-            nn.ReLU(),
+            nn.Linear(blocks[-1][0], 32),
+            nn.LayerNorm(32),
+            nn.ELU(),
             nn.Dropout(p=0.1),
             nn.Linear(32, 16),
+            nn.LayerNorm(16),
             nn.ELU(),
             nn.Linear(16, 1)
         )
-    
-    def forward(self, x):
-        batch_size, features, time_steps, nodes = x.shape
         
-        gene_indices = torch.arange(nodes, device=x.device)
-
-        gene_features = self.gene_embedding(gene_indices)  # [nodes, 32]
-
+    def forward(self, x):
+        identity = x
+        
         x = self.st_blocks(x)
         
         if self.Ko > 1:
@@ -204,24 +207,25 @@ class STGCNChebGraphConvProjectedEmbeddingAdded(nn.Module):
             x = self.fc1(x.permute(0, 2, 3, 1))
             x = self.elu(x)
             x = self.fc2(x).permute(0, 3, 1, 2)
-        
-        x = x.permute(0, 2, 3, 1)  # [batch, time_steps, nodes, features]
- 
-        gene_attention = self.gene_attention(gene_features)  # [nodes, 1]
-        
-        # temporal features with gene features
-        gene_features_expanded = gene_features.unsqueeze(0).unsqueeze(1)  # [1, 1, nodes, 32]
-        gene_features_expanded = gene_features_expanded.expand(batch_size, time_steps, -1, -1)
-        
-        x = x * gene_attention
 
-        x = torch.cat([x, gene_features_expanded], dim=-1)
-    
-        x = self.expression_proj(x)  # [batch, time_steps, nodes, 1]
-        x = x.permute(0, 3, 1, 2)  # [batch, 1, time_steps, nodes]
+        batch_size, features, time_steps, nodes = x.shape
+        x = x.permute(0, 2, 3, 1)  # [batch, time_steps, nodes, features]
+        
+        learned_attention = self.connectivity_attention(x)  # [batch, time_steps, nodes, 1]
+      
+        connectivity_weights = self.connection_weights.to(x.device)
+        connectivity_weights = connectivity_weights.view(1, 1, -1, 1)
+        
+        attention = (learned_attention * (1.0 + self.attention_scale * connectivity_weights))
+        attention = F.layer_norm(attention, [attention.size(-1)])
+
+        x = x * attention + 0.1 * x  # Small residual to maintain variation
+        
+        x = self.expression_proj(x)
+        x = x.permute(0, 3, 1, 2)
         
         return x
-
+    
 class STGCNGraphConv(nn.Module):
     # STGCNGraphConv contains 'TGTND TGTND TNFF' structure
     # GraphConv is the graph convolution from GCN.
