@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 def temporal_pattern_loss(output, target, input_sequence):
 
@@ -74,26 +75,25 @@ def temporal_loss_for_projected_model(output, target, input_sequence, alpha=0, g
     
     return total_loss
 
-def enhanced_temporal_loss(output, target, input_sequence, alpha=0.2, beta=0.2, gamma=0.3):
+def enhanced_temporal_loss(output, target, input_sequence, alpha=0.3, beta=0.3, gamma=0.4):
     mse_loss = F.mse_loss(output, target)
+    l1_loss = F.l1_loss(output, target)
     
-    # Get expression values from input sequence
+    # expression values from input sequence
     input_expressions = input_sequence[:, -1, :, :]  # [1, 3, 52]
     last_input = input_expressions[:, -1:, :]  # [1, 1, 52]
     
-    # Reshape output and target
     output_reshaped = output.squeeze(1)  # [1, 1, 52]
     target_reshaped = target.squeeze(1)  # [1, 1, 52]
     
     true_change = target_reshaped - last_input
     pred_change = output_reshaped - last_input
 
-    direction_match = torch.sign(true_change) * torch.sign(pred_change)
-    magnitude_diff = torch.abs(torch.abs(pred_change) - torch.abs(true_change))
-    magnitude_weight = torch.exp(-magnitude_diff)  # More weight to similar magnitudes
-    
-    direction_loss = 1-torch.mean(direction_match * magnitude_weight) 
-    direction_loss = direction_loss * 0.1
+    true_norm = F.normalize(true_change, p=2, dim=-1)
+    pred_norm = F.normalize(pred_change, p=2, dim=-1)
+    direction_cosine = torch.sum(true_norm * pred_norm, dim=-1)
+    direction_loss = 1 - torch.mean(direction_cosine)
+    direction_loss = direction_loss * 0.01
 
     def enhanced_trend_correlation(pred, target, sequence_expr):
         pred_trend = torch.cat([sequence_expr, pred], dim=1)
@@ -118,19 +118,20 @@ def enhanced_temporal_loss(output, target, input_sequence, alpha=0.2, beta=0.2, 
     last_sequence_val = input_expressions[:, -1, :]
     consistency_loss = torch.mean(torch.abs(output_reshaped - last_sequence_val))
 
-    direction_weight = 0.1 if direction_loss.item() > 0.1 else 0.05
-    temporal_weight = 0.2 if temporal_loss.item() > 0.2 else 0.1
-    consistency_weight = 0.3 if consistency_loss.item() > 0.3 else 0.2
+    #direction_weight = 0.1 if direction_loss.item() > 0.1 else 0.05
+    #temporal_weight = 0.3 if temporal_loss.item() > 0.2 else 0.1
+    #consistency_weight = 0.3 if consistency_loss.item() > 0.3 else 0.2
     
     total_loss = (
-        0.3 * mse_loss + 
-        direction_weight * direction_loss + 
-        temporal_weight * temporal_loss +
-        consistency_weight * consistency_loss
+        0.3 * mse_loss +
+        0.2 * direction_loss + 
+        0.2 * temporal_loss +
+        0.3 * consistency_loss
     )
 
     print(f"\nLoss Components:")
     print(f"MSE Loss: {mse_loss.item():.4f}")
+    #print(f"L1 loss: {l1_loss.item():.4f}")
     print(f"Direction Loss: {direction_loss.item():.4f}")
     print(f"Temporal Loss: {temporal_loss.item():.4f}")
     print(f"Consistency Loss: {consistency_loss.item():.4f}")
@@ -142,6 +143,7 @@ def gene_specific_loss(output, target, input_sequence, gene_correlations=None, a
     output = output[:, :, -1, :]  # [batch_size, 1, nodes]
     target = target[:, :, -1, :]  # [batch_size, 1, nodes]s
     mse_loss = F.mse_loss(output, target)
+    l1_loss = F.l1_loss(output, target)
     
     if gene_correlations is not None:
         gene_mse_loss = F.mse_loss(output, target, reduction='none').mean(dim=(0, 1))  # [nodes]
@@ -175,12 +177,11 @@ def gene_specific_loss(output, target, input_sequence, gene_correlations=None, a
     true_change = target_reshaped - last_input
     pred_change = output_reshaped - last_input
 
-    direction_match = torch.sign(true_change) * torch.sign(pred_change)
-    magnitude_diff = torch.abs(torch.abs(pred_change) - torch.abs(true_change))
-    magnitude_weight = torch.exp(-magnitude_diff) 
-    
-    direction_loss = 1 - torch.mean(direction_match * magnitude_weight)
-    direction_loss = direction_loss * 0.1
+    true_norm = F.normalize(true_change, p=2, dim=-1)
+    pred_norm = F.normalize(pred_change, p=2, dim=-1)
+    direction_cosine = torch.sum(true_norm * pred_norm, dim=-1)
+    direction_loss = 1 - torch.mean(direction_cosine)
+    direction_loss = direction_loss * 0.01
 
     def enhanced_trend_correlation(pred, target, sequence_expr):
         pred = pred.unsqueeze(1)  # [1, 1, 52]
@@ -210,10 +211,9 @@ def gene_specific_loss(output, target, input_sequence, gene_correlations=None, a
 
     total_loss = (
         0.3 * mse_loss +
-        0.2 * gene_specific_loss + 
-        0.1 * direction_loss +
+        0.3 * gene_specific_loss + 
         0.2 * temporal_loss +
-        0.2 * consistency_loss
+        0.3 * consistency_loss
     )
 
     print(f"\nLoss Components:")
