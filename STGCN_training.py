@@ -23,6 +23,7 @@ from create_graph_and_embeddings_STGCN import *
 from STGCN_losses import temporal_loss_for_projected_model, enhanced_temporal_loss, gene_specific_loss
 from evaluation import *
 from sklearn.model_selection import TimeSeriesSplit
+from ontology_analysis import analyze_expression_levels_kmeans
     
 def process_batch(seq, label):
     """Process batch data for training."""
@@ -124,7 +125,7 @@ def train_stgcn(dataset,val_ratio=0.2):
     model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
     model = model.float() # convert model to float otherwise I am getting type error
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0007)
+    optimizer = optim.Adam(model.parameters(), lr=0.0007, weight_decay=1e-5)
     #criterion = nn.MSELoss()
 
     gene_correlations = compute_gene_correlations(dataset, model)
@@ -142,8 +143,7 @@ def train_stgcn(dataset,val_ratio=0.2):
 
     train_losses = []
     val_losses = []
-    interaction_losses = []
-
+    
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
@@ -177,17 +177,17 @@ def train_stgcn(dataset,val_ratio=0.2):
             all_targets.append(target.detach().cpu().numpy())
             all_outputs.append(output.detach().cpu().numpy())
             #loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
-            #loss = enhanced_temporal_loss(
-            #    output[:, :, -1:, :],
-            #    target,
-            #    x
-            #)
-            loss = gene_specific_loss(
+            loss = enhanced_temporal_loss(
                 output[:, :, -1:, :],
                 target,
-                x,
-                gene_correlations=gene_correlations 
-                )
+                x
+            )
+            #loss = gene_specific_loss(
+            #    output[:, :, -1:, :],
+            #    target,
+            #    x,
+            #    gene_correlations=gene_correlations 
+            #    )
             #loss = criterion(output[:, :, -1:, :], target)
             if torch.isnan(loss):
                 print("NaN loss detected!")
@@ -219,13 +219,13 @@ def train_stgcn(dataset,val_ratio=0.2):
                 #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
                 #val_loss = criterion(output[:, :, -1:, :], target)
-                #val_loss = enhanced_temporal_loss(output[:, :, -1:, :], target, x)
-                val_loss = gene_specific_loss(
-                    output[:, :, -1:, :],
-                    target,
-                    x,
-                    gene_correlations=gene_correlations 
-                )
+                val_loss = enhanced_temporal_loss(output[:, :, -1:, :], target, x)
+                #val_loss = gene_specific_loss(
+                #    output[:, :, -1:, :],
+                #    target,
+                #    x,
+                #    gene_correlations=gene_correlations 
+                #)
                 val_loss_total += val_loss.item()
 
                 output_corr = calculate_correlation(output)
@@ -242,7 +242,6 @@ def train_stgcn(dataset,val_ratio=0.2):
         
         train_losses.append(avg_train_loss)
         val_losses.append(avg_val_loss)
-        interaction_losses.append(avg_interaction_loss)
         
         print(f'Epoch {epoch+1}/{num_epochs}')
         print(f'Training Loss: {avg_train_loss:.4f}')
@@ -284,7 +283,130 @@ def train_stgcn(dataset,val_ratio=0.2):
     #plt.savefig(f'{save_dir}/training_progress.png')
     plt.close()
     
-    return model, val_sequences, val_labels, train_losses, val_losses, train_sequences, train_labels  
+    return model, val_sequences, val_labels, train_losses, val_losses, train_sequences, train_labels 
+
+def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
+    args = Args()
+    args.n_vertex = dataset.num_nodes
+
+    clusters, gene_expressions = analyze_expression_levels_kmeans(dataset)
+    sequences, labels = dataset.get_temporal_sequences()
+
+    edge_index = sequences[0][0].edge_index
+    edge_weight = sequences[0][0].edge_attr.squeeze() if sequences[0][0].edge_attr is not None else None
+    adj = torch.zeros((args.n_vertex, args.n_vertex))
+    adj[edge_index[0], edge_index[1]] = 1 if edge_weight is None else edge_weight
+    D = torch.diag(torch.sum(adj, dim=1) ** (-0.5))
+    args.gso = torch.eye(args.n_vertex) - D @ adj @ D
+
+    n_samples = len(sequences)
+    n_train = int(n_samples * (1 - val_ratio))
+    indices = torch.randperm(n_samples)
+    train_idx = indices[:n_train]
+    val_idx = indices[n_train:]
+
+    model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
+    model = model.float()
+    optimizer = optim.Adam(model.parameters(), lr=0.0007, weight_decay=1e-5)
+
+    num_epochs = 100
+    curriculum_epochs = 30 
+    best_val_loss = float('inf')
+    patience = 15
+    patience_counter = 0
+    save_dir = 'plottings_STGCN'
+    os.makedirs(save_dir, exist_ok=True)
+
+    train_losses = []
+    val_losses = []
+
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+
+        if epoch < curriculum_epochs:
+            current_genes = clusters['high_expr']
+            print(f"Epoch {epoch+1}: Training on {len(current_genes)} high expression genes")
+        elif epoch < curriculum_epochs * 2:
+            current_genes = clusters['high_expr'] + clusters['medium_expr']
+            print(f"Epoch {epoch+1}: Training on {len(current_genes)} high+medium expression genes")
+        else:
+            current_genes = clusters['high_expr'] + clusters['medium_expr'] + clusters['low_expr']
+            print(f"Epoch {epoch+1}: Training on all {len(current_genes)} genes")
+
+        current_train_sequences = []
+        current_train_labels = []
+        for idx in train_idx:
+            seq = sequences[idx]
+            label = labels[idx]
+            if any(gene in current_genes for gene in dataset.node_map.keys()):
+                current_train_sequences.append(seq)
+                current_train_labels.append(label)
+        for seq, label in zip(current_train_sequences, current_train_labels):
+            optimizer.zero_grad()
+            x, target = process_batch(seq, label)
+            output = model(x)
+            
+            loss = enhanced_temporal_loss(
+                output[:, :, -1:, :],
+                target,
+                x
+            )
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+        model.eval()
+        val_loss_total = 0
+        with torch.no_grad():
+            for seq, label in zip(val_sequences, val_labels):
+                x, target = process_batch(seq, label)
+                output = model(x)
+                val_loss = enhanced_temporal_loss(output[:, :, -1:, :], target, x)
+                val_loss_total += val_loss.item()
+
+        avg_train_loss = total_loss / len(current_train_sequences)
+        avg_val_loss = val_loss_total / len(val_sequences)
+
+        train_losses.append(avg_train_loss)
+        val_losses.append(avg_val_loss)
+        print(f'Training Loss: {avg_train_loss:.4f}')
+        print(f'Validation Loss: {avg_val_loss:.4f}')
+
+        # Early stopping 
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_val_loss,
+            }, f'{save_dir}/best_model.pth')
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered.")
+                break
+    
+    checkpoint = torch.load(f'{save_dir}/best_model.pth', weights_only=True)
+    model.load_state_dict(checkpoint['model_state_dict'])
+
+    plt.figure(figsize=(10, 5))
+    
+    plt.plot(train_losses, label='Train')
+    plt.plot(val_losses, label='Validation')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
+    plt.savefig(f'{save_dir}/training_progress.png')
+    plt.close()
+
+    return model, val_sequences, val_labels, train_losses, val_losses, train_sequences, train_labels
 
 def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCN'):
 
@@ -740,6 +862,11 @@ def analyze_gene_characteristics(dataset, predictions, targets):
     for gene, stats in sorted_by_corr:
         print(f"{gene}: correlation {stats['correlation']:.4f}, connections: {stats['degree']}")
     
+    print(f"\nCorrelation values for all genes:")
+    sorted_by_corr_all_genes = sorted(gene_stats.items(), key=lambda x: x[1]['correlation'], reverse=True)
+    for gene, stats in sorted_by_corr_all_genes:
+        print(f"{gene}: correlation {stats['correlation']:.4f}, connections: {stats['degree']}")
+    
     return gene_stats
 
 def analyze_temporal_patterns(dataset, predictions, targets):
@@ -781,9 +908,10 @@ class Args:
        
         self.blocks = [
             [16, 16, 16],  # Input block
-            [16, 8, 8],     # Single ST block
-            [8, 8, 1]      # Output block
+            [16, 16, 16],     # Single ST block
+            [16, 8, 1]      # Output block
         ]
+    
         self.act_func = 'glu'
         self.graph_conv_type = 'cheb_graph_conv'
         self.enable_bias = True
@@ -791,13 +919,13 @@ class Args:
 
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
-        csv_file='mapped/enhanced_interactions_new.csv',
+        csv_file='mapped/enhanced_interactions_new_new.csv',
         embedding_dim=16,
         seq_len=3,
         pred_len=1
     )
 
-    model, val_sequences, val_labels, train_losses, val_losses, train_sequences, train_labels = train_stgcn(dataset, val_ratio=0.2)
+    model, val_sequences, val_labels, train_losses, val_losses, train_sequences, train_labels = train_stgcn_high_expr_first(dataset, val_ratio=0.2)
     
     metrics = evaluate_model_performance(model, val_sequences, val_labels, dataset)
     plot_gene_predictions_train_val(model, train_sequences, train_labels, val_sequences, val_labels, dataset)
