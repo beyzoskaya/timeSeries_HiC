@@ -38,6 +38,11 @@ class TemporalGraphDataset:
         self.df = pd.read_csv(csv_file)
         self.df['Gene1_clean'] = self.df['Gene1'].apply(clean_gene_name)
         self.df['Gene2_clean'] = self.df['Gene2'].apply(clean_gene_name)
+
+        #genes_to_remove = {'THTPA', 'AMACR', 'MMP7', 'ABCG2', 'HPGDS', 'VIM'}
+        # Filter out genes which gave negative correlation to see performance of other genes 
+        #self.df = self.df[~self.df['Gene1_clean'].isin(genes_to_remove)]
+        #self.df = self.df[~self.df['Gene2_clean'].isin(genes_to_remove)]
         
         # Create static node mapping
         unique_genes = pd.concat([self.df['Gene1_clean'], self.df['Gene2_clean']]).unique()
@@ -89,7 +94,7 @@ class TemporalGraphDataset:
     def create_temporal_node_features_several_graphs_created(self):
         temporal_features = {}
         
-        # First, normalize all expression values across all time points
+        # normalize all expression values across all time points
         print("\nNormalizing expression values across all time points...")
         all_expressions = []
         for t in self.time_points:
@@ -113,7 +118,6 @@ class TemporalGraphDataset:
         for t in self.time_points:
             print(f"\nProcessing time point {t}")
             
-            # First get normalized expression values
             expression_values = {}
             for gene in self.node_map.keys():
                 gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
@@ -127,7 +131,7 @@ class TemporalGraphDataset:
             G = nx.Graph()
             G.add_nodes_from(self.node_map.keys())
             
-            # Add edges with normalized weights
+            # edges with normalized weights
             for _, row in self.df.iterrows():
                 gene1 = row['Gene1_clean']
                 gene2 = row['Gene2_clean']
@@ -146,8 +150,8 @@ class TemporalGraphDataset:
                 weight = (hic_weight * 0.25 +
                         compartment_sim * 0.1 +
                         tad_sim * 0.1 +
-                        ins_sim * 0.05 +
-                        expr_sim * 0.5)
+                        ins_sim * 0.1 +
+                        expr_sim * 0.45)
                 
                 G.add_edge(gene1, gene2, weight=weight)
             
@@ -299,8 +303,8 @@ class TemporalGraphDataset:
             node2vec = Node2Vec(
                 G,
                 dimensions=self.embedding_dim,
-                walk_length=20,
-                num_walks=100,
+                walk_length=10,
+                num_walks=20,
                 p=1.0,
                 q=1.0,
                 #p=1.739023,
@@ -310,7 +314,7 @@ class TemporalGraphDataset:
             )
             
             model = node2vec.fit(
-                window=15,
+                window=5,
                 min_count=1,
                 batch_words=4
             )
@@ -434,5 +438,27 @@ class TemporalGraphDataset:
         
         return sequences, labels
     
+    def split_sequences(self,sequences, labels):
+        torch.manual_seed(42)
+        
+        n_samples = len(sequences)
+        n_train = int(n_samples * (1 - 0.2))
+
+        indices = torch.randperm(n_samples)
+        train_idx = indices[:n_train]
+        val_idx = indices[n_train:]
+
+        train_sequences = [sequences[i] for i in train_idx]
+        train_labels = [labels[i] for i in train_idx]
+        val_sequences = [sequences[i] for i in val_idx]
+        val_labels = [labels[i] for i in val_idx]
+        
+        print("\nData Split Statistics:")
+        print(f"Total sequences: {n_samples}")
+        print(f"Training sequences: {len(train_sequences)} ({len(train_sequences)/n_samples:.1%})")
+        print(f"Validation sequences: {len(val_sequences)} ({len(val_sequences)/n_samples:.1%})")
+        
+        return train_sequences, train_labels, val_sequences, val_labels, train_idx, val_idx
+        
 
  
