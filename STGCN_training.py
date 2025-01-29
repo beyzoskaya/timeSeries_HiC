@@ -16,13 +16,12 @@ from STGCN.model.models import *
 import sys
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 sys.path.append('./STGCN')
-from STGCN.model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected, STGCNGraphConv, STGCNGraphConvProjected, EnhancedSTGCNChebGraphConvProjected
+from STGCN.model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected, STGCNGraphConv, STGCNGraphConvProjected, STGCNChebGraphConvProjectedGeneConnectedAttention
 import argparse
 from scipy.spatial.distance import cdist
 from create_graph_and_embeddings_STGCN import *
 from STGCN_losses import temporal_loss_for_projected_model, enhanced_temporal_loss, gene_specific_loss
 from evaluation import *
-from sklearn.model_selection import TimeSeriesSplit
 from ontology_analysis import analyze_expression_levels_kmeans
     
 def process_batch(seq, label):
@@ -59,6 +58,14 @@ def compute_gene_correlations(dataset, model):
     gene_correlations = np.array([np.corrcoef(predictions[:, i], targets[:, i])[0, 1] for i in range(targets.shape[1])])
     return torch.tensor(gene_correlations, dtype=torch.float32)
 
+def compute_gene_connections(dataset):
+    connections = {}
+    for idx, gene in enumerate(dataset.node_map.keys()):
+        count1 = len(dataset.df[dataset.df['Gene1'] == gene])
+        count2 = len(dataset.df[dataset.df['Gene2'] == gene])
+        connections[idx] = float(count1 + count2)
+    return connections
+
 def train_stgcn(dataset,val_ratio=0.2):
     # ADDED FOR GRID SEARCH ARGS
     #if args is None: 
@@ -91,9 +98,7 @@ def train_stgcn(dataset,val_ratio=0.2):
     train_labels = labels[:n_train]
     val_sequences = sequences[n_train:]
     val_labels = labels[n_train:]
-    """   
 
-    torch.manual_seed(42)
     # Random split
     n_samples = len(sequences)
     n_train = int(n_samples * (1 - val_ratio))
@@ -104,7 +109,10 @@ def train_stgcn(dataset,val_ratio=0.2):
     train_labels = [labels[i] for i in train_idx]
     val_sequences = [sequences[i] for i in val_idx]
     val_labels = [labels[i] for i in val_idx]
-    
+    """   
+
+    torch.manual_seed(42)
+    train_sequences, train_labels, val_sequences, val_labels, train_idx, val_idx = dataset.split_sequences(sequences, labels)
     
     with open('plottings_STGCN/split_indices.txt', 'w') as f:
         f.write("Train Indices:\n")
@@ -112,20 +120,22 @@ def train_stgcn(dataset,val_ratio=0.2):
         f.write("\nValidation Indices:\n")
         f.write(", ".join(map(str, val_idx)) + "\n")
 
-    print(f"\nData Split:")
-    print(f"Training sequences: {len(sequences)}")
-    print(f"Validation sequences: {len(val_sequences)}")
+    #print(f"\nData Split:")
+    #print(f"Training sequences: {len(sequences)}")
+    #print(f"Validation sequences: {len(val_sequences)}")
 
 
-    print("\n=== Training Data Statistics ===")
-    print(f"Number of training sequences: {len(sequences)}")
-    print(f"Number of validation sequences: {len(val_sequences)}")
-    
-    # Initialize STGCN
-    model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
+    #print("\n=== Training Data Statistics ===")
+    #print(f"Number of training sequences: {len(sequences)}")
+    #print(f"Number of validation sequences: {len(val_sequences)}")
+
+    #model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
+    gene_connections = compute_gene_connections(dataset)
+    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.blocks, args.n_vertex, gene_connections)
+    #model =STGCNChebGraphConvWithTemporalAttention(args, args.blocks, args.n_vertex, gene_connections)
     model = model.float() # convert model to float otherwise I am getting type error
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0007)
+    optimizer = optim.Adam(model.parameters(), lr=0.0007, weight_decay=1e-5)
     #criterion = nn.MSELoss()
 
     gene_correlations = compute_gene_correlations(dataset, model)
@@ -134,9 +144,9 @@ def train_stgcn(dataset,val_ratio=0.2):
     print("Max Correlation:", gene_correlations.max().item())
     print("Mean Correlation:", gene_correlations.mean().item())
 
-    num_epochs = 100
+    num_epochs = 80
     best_val_loss = float('inf')
-    patience = 15
+    patience = 20
     patience_counter = 0
     save_dir = 'plottings_STGCN'
     os.makedirs(save_dir, exist_ok=True)
@@ -176,18 +186,19 @@ def train_stgcn(dataset,val_ratio=0.2):
 
             all_targets.append(target.detach().cpu().numpy())
             all_outputs.append(output.detach().cpu().numpy())
-            #loss = temporal_pattern_loss(output[:, :, -1:, :], target, x)
-            loss = enhanced_temporal_loss(
-                output[:, :, -1:, :],
-                target,
-                x
-            )
-            #loss = gene_specific_loss(
+            #loss = enhanced_temporal_loss(
             #    output[:, :, -1:, :],
             #    target,
-            #    x,
-            #    gene_correlations=gene_correlations 
-            #    )
+            #    x
+            #)
+
+            loss = gene_specific_loss(
+                output[:, :, -1:, :],
+                target,
+                x,
+                gene_correlations=gene_correlations 
+                )
+
             #loss = criterion(output[:, :, -1:, :], target)
             if torch.isnan(loss):
                 print("NaN loss detected!")
@@ -219,13 +230,13 @@ def train_stgcn(dataset,val_ratio=0.2):
                 #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
                 #val_loss = criterion(output[:, :, -1:, :], target)
-                val_loss = enhanced_temporal_loss(output[:, :, -1:, :], target, x)
-                #val_loss = gene_specific_loss(
-                #    output[:, :, -1:, :],
-                #    target,
-                #    x,
-                #    gene_correlations=gene_correlations 
-                #)
+                #val_loss = enhanced_temporal_loss(output[:, :, -1:, :], target, x)
+                val_loss = gene_specific_loss(
+                    output[:, :, -1:, :],
+                    target,
+                    x,
+                    gene_correlations=gene_correlations 
+                )
                 val_loss_total += val_loss.item()
 
                 output_corr = calculate_correlation(output)
@@ -238,7 +249,7 @@ def train_stgcn(dataset,val_ratio=0.2):
         # Calculate average losses
         avg_train_loss = total_loss / len(train_sequences)
         avg_val_loss = val_loss_total / len(val_sequences)
-        avg_interaction_loss = epoch_interaction_loss / len(val_sequences)
+        #avg_interaction_loss = epoch_interaction_loss / len(val_sequences)
         
         train_losses.append(avg_train_loss)
         val_losses.append(avg_val_loss)
@@ -313,14 +324,17 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
     all_train_sequences = [sequences[i] for i in train_idx]
     all_train_labels = [labels[i] for i in train_idx]
 
-    model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
+    gene_connections = compute_gene_connections(dataset)
+    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.blocks, args.n_vertex, gene_connections)
     model = model.float()
-    optimizer = optim.Adam(model.parameters(), lr=0.0007, weight_decay=1e-5)
+    optimizer = optim.Adam(model.parameters(), lr=0.0009, weight_decay=1e-5)
+    gene_correlations = compute_gene_correlations(dataset, model)
+    criterion = nn.MSELoss()
 
     num_epochs = 100
     curriculum_epochs = 15
     best_val_loss = float('inf')
-    patience = 15
+    patience = 20
     patience_counter = 0
     save_dir = 'plottings_STGCN'
     os.makedirs(save_dir, exist_ok=True)
@@ -354,11 +368,13 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
             x, target = process_batch(seq, label)
             output = model(x)
             
-            loss = enhanced_temporal_loss(
+            loss = gene_specific_loss(
                 output[:, :, -1:, :],
                 target,
-                x
-            )
+                x,
+                gene_correlations=gene_correlations 
+                )
+            #loss = criterion(output[:, :, -1:, :], target)
 
             if torch.isnan(loss):
                 print("NaN loss detected!")
@@ -376,7 +392,14 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
             for seq, label in zip(val_sequences, val_labels):
                 x, target = process_batch(seq, label)
                 output = model(x)
-                val_loss = enhanced_temporal_loss(output[:, :, -1:, :], target, x)
+                #val_loss = enhanced_temporal_loss(output[:, :, -1:, :], target, x)
+                val_loss = gene_specific_loss(
+                output[:, :, -1:, :],
+                target,
+                x,
+                gene_correlations=gene_correlations 
+                )
+                #val_loss = criterion(output[:, :, -1:, :], target)
                 val_loss_total += val_loss.item()
 
         if len(current_train_sequences) > 0: 
@@ -421,7 +444,7 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
     
     plt.tight_layout()
     plt.show()
-    plt.savefig(f'{save_dir}/training_progress.png')
+    #plt.savefig(f'{save_dir}/training_progress.png')
     plt.close()
 
     return model, val_sequences, val_labels, train_losses, val_losses, all_train_sequences, all_train_labels
@@ -917,17 +940,51 @@ def analyze_temporal_patterns(dataset, predictions, targets):
     
     return temporal_stats
 
+def analyze_problematic_genes(dataset, problematic_genes):
+    gene_stats = {}
+    
+    for gene in problematic_genes:
+        gene_idx = dataset.node_map.get(gene)
+        if gene_idx is None:
+            continue
+            
+        stats = {
+            'connections': 0,
+            'hic_weights': [],
+            'compartment_matches': 0,
+            'tad_distances': [],
+            'expression_variance': []
+        }
+        
+        for _, row in dataset.df.iterrows():
+            if row['Gene1_clean'] == gene or row['Gene2_clean'] == gene:
+                stats['connections'] += 1
+                stats['hic_weights'].append(row['HiC_Interaction'])
+                stats['compartment_matches'] += 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
+                stats['tad_distances'].append(abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance']))
+
+        for t in dataset.time_points:
+            expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+            if len(expr) > 0:
+                stats['expression_variance'].append(expr[0])
+        
+        stats['avg_hic_weight'] = np.mean(stats['hic_weights']) if stats['hic_weights'] else 0
+        stats['expression_std'] = np.std(stats['expression_variance']) if stats['expression_variance'] else 0
+        gene_stats[gene] = stats
+    
+    return gene_stats
+
 class Args:
     def __init__(self):
         self.Kt = 3 # temporal kernel size
         self.Ks = 3  # spatial kernel size
-        self.n_his = 3  # historical sequence length
+        self.n_his = 4  # historical sequence length
         self.n_pred = 1
        
         self.blocks = [
-            [16, 16, 16],  # Input block
-            [16, 16, 16],  # Single ST block
-            [16, 8, 1]     # Output block
+            [32, 32, 32],    # Input block
+            [32, 48, 48],    # Single ST block (since temporal dim reduces quickly)
+            [48, 32, 1]      # Output block
         ]
     
         self.act_func = 'glu'
@@ -938,12 +995,12 @@ class Args:
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
         csv_file='mapped/enhanced_interactions_new_new.csv',
-        embedding_dim=16,
+        embedding_dim=32,
         seq_len=3,
         pred_len=1
     )
 
-    model, val_sequences, val_labels, train_losses, val_losses, train_sequences, train_labels = train_stgcn_high_expr_first(dataset, val_ratio=0.2)
+    model, val_sequences, val_labels, train_losses, val_losses, train_sequences, train_labels = train_stgcn(dataset, val_ratio=0.2)
     
     metrics = evaluate_model_performance(model, val_sequences, val_labels, dataset)
     plot_gene_predictions_train_val(model, train_sequences, train_labels, val_sequences, val_labels, dataset)
@@ -966,3 +1023,29 @@ if __name__ == "__main__":
     predictions, targets = get_predictions_and_targets(model, val_sequences, val_labels)
     gene_stats = analyze_gene_characteristics(dataset, predictions, targets)
     temporal_stats = analyze_temporal_patterns(dataset, predictions, targets)
+
+    problematic_genes = ['THTPA', 'AMACR', 'MMP7', 'ABCG2', 'HPGDS', 'VIM']
+    gene_stats = analyze_problematic_genes(dataset, problematic_genes)
+
+    for gene, stats in gene_stats.items():
+        print(f"\nGene: {gene}")
+        print("-" * 30)
+        print(f"Number of connections: {stats['connections']}")
+        print(f"Average HiC interaction weight: {stats['avg_hic_weight']:.4f}")
+        print(f"Compartment matches: {stats['compartment_matches']}")
+        print(f"Expression standard deviation: {stats['expression_std']:.4f}")
+        
+        if stats['tad_distances']:
+            print(f"Average TAD boundary distance: {np.mean(stats['tad_distances']):.4f}")
+        
+        print("\nHiC Interactions:")
+        if stats['hic_weights']:
+            print(f"Min HiC weight: {min(stats['hic_weights']):.4f}")
+            print(f"Max HiC weight: {max(stats['hic_weights']):.4f}")
+            print(f"Mean HiC weight: {np.mean(stats['hic_weights']):.4f}")
+        
+        if stats['expression_variance']:
+            print("\nExpression Statistics:")
+            print(f"Min expression: {min(stats['expression_variance']):.4f}")
+            print(f"Max expression: {max(stats['expression_variance']):.4f}")
+            print(f"Expression range: {max(stats['expression_variance']) - min(stats['expression_variance']):.4f}")
