@@ -117,8 +117,6 @@ def analyze_expression_levels_kmeans(dataset, n_clusters=3):
 
     return clusters, gene_expressions
 
-import numpy as np
-
 def analyze_expression_levels_research(dataset):
     high_expr_genes = {'VIM', 'tfrc', 'EGFR', 'CD38', 'TGFB1', 'Vegf', 'MMP7', 'MMP-3', 'FOXF2', 'ABCA3', 'Lrp2', 'THTPA', 'ABCG2', 'F13A1', 'Thy1', 'ppia', 'Hist1h1b'}
     medium_expr_genes = {'ADAMTSL2', 'P-63', 'FGF18', 'GATA-6', 'NME3', 'TTF-1', 'E2F8', 'RAGE', 'GUCY1A2  sGC', 'MGAT4A', 'Igfbp3', 'EPHA7', 'SFTP-D', 'Kcnma1', 'ywhaz', 'hmbs', 'tbp', 'Claudin5', 'Claudin 1', 'MCPt4','integrin subunit alpha 8', 'Tnc'}
