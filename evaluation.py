@@ -309,21 +309,46 @@ def create_detailed_gene_plots(predictions, targets, dataset, save_dir):
 
 
 def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequences, val_labels, dataset):
-
-    def get_predictions(sequences, labels):
-        predictions = []
-        targets = []
+    
+    def get_predictions_for_plotting(model, sequences, labels):
         model.eval()
+        all_predictions = []
+        all_targets = []
+        
         with torch.no_grad():
             for seq, label in zip(sequences, labels):
-                pred = model(seq)
-                predictions.append(pred.squeeze().cpu().numpy())
-                targets.append(label[0].x.squeeze().cpu().numpy())
-        return np.vstack(predictions), np.vstack(targets)
+                x, target = process_batch(seq, label)
+                output = model(x)
+                
+                # Take last time step
+                output = output[:, :, -1:, :]
+                
+                # Convert to numpy and reshape
+                pred = output.squeeze().cpu().numpy()
+                true = target.squeeze().cpu().numpy()
+                
+                if len(pred.shape) == 1:
+                    pred = pred.reshape(1, -1)
+                if len(true.shape) == 1:
+                    true = true.reshape(1, -1)
+                
+                all_predictions.append(pred)
+                all_targets.append(true)
+
+        predictions = np.vstack(all_predictions)
+        targets = np.vstack(all_targets)
+        
+        return predictions, targets
     
-    train_pred, train_true = get_predictions(train_sequences, train_labels)
-    val_pred, val_true = get_predictions(val_sequences, val_labels)
+    print("Getting training predictions...")
+    train_pred, train_true = get_predictions_for_plotting(model, train_sequences, train_labels)
+    print(f"Training predictions shape: {train_pred.shape}")
     
+    print("Getting validation predictions...")
+    val_pred, val_true = get_predictions_for_plotting(model, val_sequences, val_labels)
+    print(f"Validation predictions shape: {val_pred.shape}")
+
+    print("Calculating gene connections...")
     gene_connections = {}
     for gene in dataset.node_map.keys():
         gene_idx = dataset.node_map[gene]
@@ -331,16 +356,27 @@ def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequenc
                          if edge[0] == gene_idx or edge[1] == gene_idx]) // 2
         gene_connections[gene] = connections
     
+    print("Calculating gene metrics...")
     gene_metrics = {}
     for gene, gene_idx in dataset.node_map.items():
-        train_corr, _ = pearsonr(train_pred[:, gene_idx], train_true[:, gene_idx])
-        val_corr, _ = pearsonr(val_pred[:, gene_idx], val_true[:, gene_idx])
-        gene_metrics[gene] = {
-            'train_corr': train_corr,
-            'val_corr': val_corr,
-            'connections': gene_connections[gene]
-        }
+        try:
+            train_corr, _ = pearsonr(train_pred[:, gene_idx], train_true[:, gene_idx])
+            val_corr, _ = pearsonr(val_pred[:, gene_idx], val_true[:, gene_idx])
+            
+            gene_metrics[gene] = {
+                'train_corr': train_corr,
+                'val_corr': val_corr,
+                'connections': gene_connections[gene],
+                'train_rmse': np.sqrt(mean_squared_error(train_true[:, gene_idx], train_pred[:, gene_idx])),
+                'val_rmse': np.sqrt(mean_squared_error(val_true[:, gene_idx], val_pred[:, gene_idx]))
+            }
+        except Exception as e:
+            print(f"Error calculating metrics for gene {gene}: {str(e)}")
+            continue
     
+    print("Creating plots...")
+    
+    # 1. Correlation vs Connections Scatter Plot
     plt.figure(figsize=(12, 8))
     x = [m['connections'] for m in gene_metrics.values()]
     y_train = [m['train_corr'] for m in gene_metrics.values()]
@@ -349,11 +385,13 @@ def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequenc
     plt.scatter(x, y_train, alpha=0.5, label='Training', c='blue')
     plt.scatter(x, y_val, alpha=0.5, label='Validation', c='red')
     
+    # Add labels for problematic genes
     problematic_genes = ['THTPA', 'AMACR', 'MMP7', 'ABCG2', 'HPGDS', 'VIM']
     for gene in problematic_genes:
-        plt.annotate(gene, 
-                    (gene_metrics[gene]['connections'], gene_metrics[gene]['val_corr']),
-                    xytext=(5, 5), textcoords='offset points')
+        if gene in gene_metrics:
+            plt.annotate(gene, 
+                        (gene_metrics[gene]['connections'], gene_metrics[gene]['val_corr']),
+                        xytext=(5, 5), textcoords='offset points')
     
     plt.xlabel('Number of Connections')
     plt.ylabel('Correlation')
@@ -363,22 +401,25 @@ def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequenc
     plt.savefig('plottings_STGCN/correlation_vs_connections.png')
     plt.close()
     
-    # Training vs Validation Correlation
+    # 2. Training vs Validation Correlation
     plt.figure(figsize=(12, 8))
     plt.scatter([m['train_corr'] for m in gene_metrics.values()],
                 [m['val_corr'] for m in gene_metrics.values()],
                 alpha=0.5)
     
+    # Add diagonal line
     min_corr = min(min([m['train_corr'] for m in gene_metrics.values()]),
                    min([m['val_corr'] for m in gene_metrics.values()]))
     max_corr = max(max([m['train_corr'] for m in gene_metrics.values()]),
                    max([m['val_corr'] for m in gene_metrics.values()]))
     plt.plot([min_corr, max_corr], [min_corr, max_corr], 'r--', alpha=0.5)
     
+    # Add labels for problematic genes
     for gene in problematic_genes:
-        plt.annotate(gene, 
-                    (gene_metrics[gene]['train_corr'], gene_metrics[gene]['val_corr']),
-                    xytext=(5, 5), textcoords='offset points')
+        if gene in gene_metrics:
+            plt.annotate(gene, 
+                        (gene_metrics[gene]['train_corr'], gene_metrics[gene]['val_corr']),
+                        xytext=(5, 5), textcoords='offset points')
     
     plt.xlabel('Training Correlation')
     plt.ylabel('Validation Correlation')
@@ -387,28 +428,30 @@ def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequenc
     plt.savefig('plottings_STGCN/train_vs_val_correlation.png')
     plt.close()
     
-    #  Prediction vs True Value Plot for Problematic Genes
+    # 3. Prediction vs True Value Plot for Problematic Genes
     fig, axs = plt.subplots(2, 3, figsize=(15, 10))
     fig.suptitle('Prediction vs True Values for Problematic Genes')
     
     for idx, gene in enumerate(problematic_genes):
-        row = idx // 3
-        col = idx % 3
-        gene_idx = dataset.node_map[gene]
-        
-        axs[row, col].scatter(val_true[:, gene_idx], val_pred[:, gene_idx], alpha=0.5)
-        
-        min_val = min(val_true[:, gene_idx].min(), val_pred[:, gene_idx].min())
-        max_val = max(val_true[:, gene_idx].max(), val_pred[:, gene_idx].max())
-        axs[row, col].plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.5)
-        
-        axs[row, col].set_title(f'{gene}\nCorr: {gene_metrics[gene]["val_corr"]:.3f}')
-        axs[row, col].grid(True, alpha=0.3)
-        
+        if gene in gene_metrics:
+            row = idx // 3
+            col = idx % 3
+            gene_idx = dataset.node_map[gene]
+            
+            axs[row, col].scatter(val_true[:, gene_idx], val_pred[:, gene_idx], alpha=0.5)
+ 
+            min_val = min(val_true[:, gene_idx].min(), val_pred[:, gene_idx].min())
+            max_val = max(val_true[:, gene_idx].max(), val_pred[:, gene_idx].max())
+            axs[row, col].plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.5)
+            
+            axs[row, col].set_title(f'{gene}\nCorr: {gene_metrics[gene]["val_corr"]:.3f}\nRMSE: {gene_metrics[gene]["val_rmse"]:.3f}')
+            axs[row, col].grid(True, alpha=0.3)
+    
     plt.tight_layout()
     plt.savefig('plottings_STGCN/problematic_genes_predictions.png')
     plt.close()
     
+    # 4. Connection Distribution
     plt.figure(figsize=(12, 6))
     sns.histplot(data=list(gene_connections.values()), bins=20)
     plt.xlabel('Number of Connections')
@@ -416,5 +459,18 @@ def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequenc
     plt.title('Distribution of Gene Connections')
     plt.savefig('plottings_STGCN/connection_distribution.png')
     plt.close()
+
+    print("\nSummary Statistics:")
+    print(f"Mean Training Correlation: {np.mean([m['train_corr'] for m in gene_metrics.values()]):.4f}")
+    print(f"Mean Validation Correlation: {np.mean([m['val_corr'] for m in gene_metrics.values()]):.4f}")
+    print("\nProblematic Genes Statistics:")
+    for gene in problematic_genes:
+        if gene in gene_metrics:
+            print(f"\n{gene}:")
+            print(f"Training Correlation: {gene_metrics[gene]['train_corr']:.4f}")
+            print(f"Validation Correlation: {gene_metrics[gene]['val_corr']:.4f}")
+            print(f"Number of Connections: {gene_metrics[gene]['connections']}")
+            print(f"Training RMSE: {gene_metrics[gene]['train_rmse']:.4f}")
+            print(f"Validation RMSE: {gene_metrics[gene]['val_rmse']:.4f}")
     
     return gene_metrics
