@@ -62,7 +62,7 @@ def analyze_expression_levels_kmeans(dataset, n_clusters=3):
     for gene in genes:
         expressions = []
         for t in dataset.time_points:
-            # Extract expression values for Gene1_clean and Gene2_clean
+
             gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
             gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
             expr_values = np.concatenate([gene1_expr, gene2_expr])
@@ -71,14 +71,14 @@ def analyze_expression_levels_kmeans(dataset, n_clusters=3):
         mean_expr = np.mean(expressions)
         gene_expressions[gene] = mean_expr
     
-    # Prepare the feature matrix for KMeans (only mean expression values)
+    # feature matrix for KMeans (only mean expression values)
     mean_expr_values = np.array(list(gene_expressions.values())).reshape(-1, 1)
 
-    # Apply KMeans clustering
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    # KMeans clustering
+    kmeans = KMeans(n_clusters=n_clusters, n_init=10,random_state=42)
     cluster_labels = kmeans.fit_predict(mean_expr_values)
 
-    # Map KMeans clusters to 'high_expr', 'medium_expr', 'low_expr' based on mean value order
+    # KMeans clusters to 'high_expr', 'medium_expr', 'low_expr' based on mean value order
     sorted_centers = np.argsort(kmeans.cluster_centers_.flatten())
     label_mapping = {sorted_centers[0]: 'low_expr', 
                       sorted_centers[1]: 'medium_expr', 
@@ -100,7 +100,9 @@ def analyze_expression_levels_kmeans(dataset, n_clusters=3):
         print(f"\n{cluster_name.upper()} Expression Cluster:")
         print(f"Number of genes: {len(genes)}")
         print(f"Average expression: {mean_cluster_expr:.4f}")
-        print("Genes:", ', '.join(genes[:5]), "..." if len(genes) > 5 else "")
+        #print("Genes:", ', '.join(genes[:5]), "..." if len(genes) > 5 else "")
+        print("Genes:", ', '.join(genes))
+    
 
     plt.figure(figsize=(10, 6))
     plt.hist(mean_expr_values, bins=30, alpha=0.7, label='Mean Expression Levels')
@@ -114,6 +116,56 @@ def analyze_expression_levels_kmeans(dataset, n_clusters=3):
     plt.close()
 
     return clusters, gene_expressions
+
+import numpy as np
+
+def analyze_expression_levels_research(dataset):
+    high_expr_genes = {'VIM', 'tfrc', 'EGFR', 'CD38', 'TGFB1', 'Vegf', 'MMP7', 'MMP-3', 'FOXF2', 'ABCA3', 'Lrp2', 'THTPA', 'ABCG2', 'F13A1', 'Thy1', 'ppia', 'Hist1h1b'}
+    medium_expr_genes = {'ADAMTSL2', 'P-63', 'FGF18', 'GATA-6', 'NME3', 'TTF-1', 'E2F8', 'RAGE', 'GUCY1A2  sGC', 'MGAT4A', 'Igfbp3', 'EPHA7', 'SFTP-D', 'Kcnma1', 'ywhaz', 'hmbs', 'tbp', 'Claudin5', 'Claudin 1', 'MCPt4','integrin subunit alpha 8', 'Tnc'}
+    low_expr_genes = {'INMT', 'Shisa3', 'Hist1h2ab', 'N-Cadherin', 'PRIM2', 'E2F8', 'ABCD1', 'hprt', 'HPGDS', 'AMACR', 'AGER', 'TGFB1'}
+
+    genes = list(dataset.node_map.keys())
+    gene_expressions = {}
+
+    for gene in genes:
+        expressions = []
+        for t in dataset.time_points:
+            gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+            gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+            expr_values = np.concatenate([gene1_expr, gene2_expr])
+            expressions.extend(expr_values)
+
+        mean_expr = np.mean(expressions)
+        gene_expressions[gene] = mean_expr
+
+    clusters = {
+        'high_expr': [],
+        'medium_expr': [],
+        'low_expr': []
+    }
+
+    for gene in genes:
+        if gene in high_expr_genes:
+            clusters['high_expr'].append(gene)
+        elif gene in medium_expr_genes:
+            clusters['medium_expr'].append(gene)
+        elif gene in low_expr_genes:
+            clusters['low_expr'].append(gene)
+
+    print("\nResearch-Based Expression Cluster Analysis:")
+    for cluster_name, genes_in_cluster in clusters.items():
+        if genes_in_cluster: 
+            mean_cluster_expr = np.mean([gene_expressions[g] for g in genes_in_cluster])
+            print(f"\n{cluster_name.upper()} Expression Cluster:")
+            print(f"Number of genes: {len(genes_in_cluster)}")
+            print(f"Average expression: {mean_cluster_expr:.4f}")
+            print("Genes:", ', '.join(genes_in_cluster))
+        else:
+            print(f"\n{cluster_name.upper()} Expression Cluster:")
+            print("No genes in this cluster.")
+
+    return clusters, gene_expressions
+
 
 
 
