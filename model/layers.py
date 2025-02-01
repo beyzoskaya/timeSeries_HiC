@@ -257,8 +257,7 @@ class FeatureFusionModule(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.attention = nn.Sequential(
-            nn.Linear(channels * 2, channels),
-            nn.LayerNorm(channels),
+            nn.Linear(channels*2, channels),
             nn.Sigmoid()
         )
     def forward(self, temporal_features, spatial_features):
@@ -279,42 +278,102 @@ class STConvBlockLSTM(nn.Module):
         self.lstm = nn.LSTM(
             input_size=channels[2],
             hidden_size=channels[2],
-            num_layers=2,
+            num_layers=3,
             batch_first=True,
             bidirectional=True,
             dropout=droprate 
         )
         
         self.tc2_ln = nn.LayerNorm([n_vertex, channels[2]], eps=1e-12)
+        # When using more than 1 blocks for the STConv, we need to change the dimension as 2 * features because bidirectional LSTM doubled the feature size
+        #self.tc2_ln = nn.LayerNorm([n_vertex, 2 * channels[2]], eps=1e-12)  # Update for bidirectional
         self.relu = nn.ReLU()
         self.elu = nn.ELU()
         self.dropout = nn.Dropout(p=droprate)
     
     def forward(self, x):
+        #print("Input Shape:", x.shape)
         x = self.tmp_conv1(x)
+        #print("After TemporalConv1 Shape:", x.shape)
         
         x = self.graph_conv(x)
-        x = self.elu(x)
+        x = self.relu(x)
+        #print("After GraphConv Shape:", x.shape)
         
         x = self.tmp_conv2(x)
+        #print("After TemporalConv2 Shape:", x.shape)
         
         # Reshape for LSTM: (batch, seq_len, features) -> (batch, seq_len, channels[2])
         batch_size, features, seq_len, nodes = x.shape
+        #print("Batch Size:", batch_size)  
+        #print("Features:", features)  
+        #print("Seq Len:", seq_len)  
+        #print("Nodes:", nodes)
+
         x = x.permute(0, 2, 3, 1)  # [batch, seq_len, nodes, features]
+        #print("After Permute Shape:", x.shape)
         x = x.reshape(batch_size * nodes, seq_len, features)  # [batch * nodes, seq_len, features]
+        #print("After Reshape Shape:", x.shape)
         
         x, _ = self.lstm(x)  # Output shape: [batch * nodes, seq_len, channels[2]]
+        #print("After LSTM Shape:", x.shape)
         
         # Reshape back to original shape
         x = x.reshape(batch_size, nodes, seq_len, features)
+        # When using more than 1 blocks for the STConv, we need to change the dimension as 2 * features because bidirectional LSTM doubled the feature size
+        #x = x.reshape(batch_size, nodes, seq_len, 2 * features) # bidirectional LSTM doubles the size 16 to 32
+        #print("After Reshape Back Shape:", x.shape) 
         x = x.permute(0, 3, 2, 1)  # [batch, features, seq_len, nodes]
+        #print("After Final Permute Shape:", x.shape)
 
         x = self.tc2_ln(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        #print("After LayerNorm Shape:", x.shape) 
     
         x = self.dropout(x)
+        #print("After Dropout Shape:", x.shape)
         
         return x
 
+class STConvBlockRNN(nn.Module):
+    def __init__(self, Kt, Ks, n_vertex, last_block_channel, channels, act_func, graph_conv_type, gso, bias, droprate):
+        super(STConvBlockRNN, self).__init__()
+        self.gso = gso
+        self.tmp_conv1 = TemporalConvLayer(Kt, last_block_channel, channels[0], n_vertex, act_func)
+        self.graph_conv = GraphConvLayer(graph_conv_type, channels[0], channels[1], Ks, gso, bias)
+        self.tmp_conv2 = TemporalConvLayer(Kt, channels[1], channels[2], n_vertex, act_func)
+
+        self.rnn = nn.RNN(
+            input_size=channels[2]//2,
+            hidden_size=channels[2]//2,
+            num_layers=2,    
+            batch_first=True,
+            dropout=0.1
+        )
+
+        self.tc2_ln = nn.LayerNorm([n_vertex, channels[2]], eps=1e-12)
+        self.elu = nn.ELU()
+        self.dropout = nn.Dropout(p=droprate)
+    
+    def forward(self, x):
+        x = self.tmp_conv1(x)
+        x = self.graph_conv(x)
+        x = self.elu(x)
+        x = self.tmp_conv2(x)
+        
+        batch_size, features, time_steps, nodes = x.shape
+        x = x.permute(0, 2, 3, 1)  # [batch, time_steps, nodes, features]
+        x = x.reshape(batch_size * nodes, time_steps, features)
+        
+        x, _ = self.rnn(x)
+        
+        x = x.reshape(batch_size, time_steps, nodes, features)
+        x = x.permute(0, 3, 1, 2)  # [batch, features, time_steps, nodes]
+
+        x = self.tc2_ln(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        x = self.dropout(x)
+        
+        return x
+    
 class STConvBlockLSTMFusionModule(nn.Module):
     def __init__(self, Kt, Ks, n_vertex, last_block_channel, channels, act_func, graph_conv_type, gso, bias, droprate):
         super(STConvBlockLSTMFusionModule, self).__init__()
@@ -377,7 +436,7 @@ class STConvBlockGRU(nn.Module):
         self.gru = nn.GRU(
             input_size=channels[2],  # Input feature size
             hidden_size=channels[2], # Hidden state size
-            num_layers=1,            # Number of GRU layers
+            num_layers=2,            # Number of GRU layers
             batch_first=True         # Input shape: (batch, seq_len, features)
         )
 
@@ -497,7 +556,7 @@ class OutputBlock(nn.Module):
         x = self.tmp_conv1(x)
         x = self.tc1_ln(x.permute(0, 2, 3, 1))
         x = self.fc1(x)
-        x = self.elu(x)
+        x = self.relu(x)
         #x = self.dropout(x)
         x = self.fc2(x).permute(0, 3, 1, 2)
 

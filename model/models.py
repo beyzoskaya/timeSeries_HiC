@@ -146,7 +146,7 @@ class STGCNChebGraphConvProjected(nn.Module):
         x = x.permute(0, 3, 1, 2)  # [batch, 1, time_steps, nodes]
         
         return x 
-
+    
 class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
     def __init__(self, args, blocks, n_vertex, gene_connections):
         super(STGCNChebGraphConvProjectedGeneConnectedAttention, self).__init__()
@@ -157,7 +157,7 @@ class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
         
         modules = []
         for l in range(len(blocks) - 3):
-            modules.append(layers.STConvBlockLSTM(args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1], 
+            modules.append(layers.STConvBlock(args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1], 
                                             args.act_func, args.graph_conv_type, args.gso, 
                                             args.enable_bias, args.droprate))
         self.st_blocks = nn.Sequential(*modules)
@@ -165,10 +165,10 @@ class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
         self.Ko = Ko
 
         self.connectivity_attention = nn.Sequential(
-            nn.Linear(blocks[-1][0], blocks[-1][0] // 2),
-            nn.LayerNorm(blocks[-1][0] // 2),
+            nn.Linear(blocks[-1][0], blocks[-1][0]//2),
+            nn.LayerNorm(blocks[-1][0]//2 ),
             nn.ELU(),
-            nn.Linear(blocks[-1][0] // 2, 1),
+            nn.Linear(blocks[-1][0]//2, 1),
             nn.Sigmoid()
         )
         
@@ -183,7 +183,7 @@ class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
             self.fc2 = nn.Linear(in_features=blocks[-2][0], out_features=blocks[-1][0], 
                                 bias=args.enable_bias)
             self.relu = nn.ReLU()
-            self.elu = nn.ELU()
+            #self.elu = nn.ELU()
             self.dropout = nn.Dropout(p=args.droprate)
         
         self.expression_proj = nn.Sequential(
@@ -214,7 +214,7 @@ class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
         
         learned_attention = self.connectivity_attention(x)  # [batch, time_steps, nodes, 1]
       
-        connectivity_weights = self.connection_weights.to(x.device)
+        connectivity_weights = self.connection_weights
         connectivity_weights = connectivity_weights.view(1, 1, -1, 1)
         
         attention = (learned_attention * (1.0 + self.attention_scale * connectivity_weights))
@@ -222,6 +222,113 @@ class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
 
         x = x * attention + 0.1 * x  # Small residual to maintain variation
         
+        x = self.expression_proj(x)
+        x = x.permute(0, 3, 1, 2)
+        
+        return x
+
+
+class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
+    def __init__(self, args, blocks, n_vertex, gene_connections):
+        super(STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM, self).__init__()
+        
+        connections = torch.tensor([gene_connections.get(i, 0) for i in range(n_vertex)], 
+                                 dtype=torch.float32)
+        self.connection_weights = F.softmax(connections, dim=0)
+        
+        modules = []
+        for l in range(len(blocks) - 3):
+            modules.append(layers.STConvBlock(args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1], 
+                                            args.act_func, args.graph_conv_type, args.gso, 
+                                            args.enable_bias, args.droprate))
+        self.st_blocks = nn.Sequential(*modules)
+        Ko = args.n_his - (len(blocks) - 3) * 2 * (args.Kt - 1)
+        self.Ko = Ko
+
+        # bidirectional LSTM 
+        self.lstm = nn.LSTM(
+            input_size=blocks[-3][-1],  # Input size is the feature dimension
+            hidden_size=blocks[-3][-1],
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.1
+        )
+    
+        self.lstm_proj = nn.Linear(2 * blocks[-3][-1], blocks[-3][-1])  # *2 for bidirectional
+        
+        self.lstm_norm = nn.LayerNorm([n_vertex, blocks[-3][-1]])
+        
+        self.connectivity_attention = nn.Sequential(
+            nn.Linear(blocks[-1][0], blocks[-1][0]//2),
+            nn.LayerNorm(blocks[-1][0]//2),
+            nn.ELU(),
+            nn.Linear(blocks[-1][0]//2, 1),
+            nn.Sigmoid()
+        )
+        
+        self.attention_scale = nn.Parameter(torch.tensor(0.1))
+
+        if self.Ko > 1:
+            self.output = layers.OutputBlock(Ko, blocks[-3][-1], blocks[-2], blocks[-1][0], 
+                                           n_vertex, args.act_func, args.enable_bias, args.droprate)
+        elif self.Ko == 0:
+            self.fc1 = nn.Linear(in_features=blocks[-3][-1], out_features=blocks[-2][0], 
+                                bias=args.enable_bias)
+            self.fc2 = nn.Linear(in_features=blocks[-2][0], out_features=blocks[-1][0], 
+                                bias=args.enable_bias)
+            self.relu = nn.ReLU()
+            self.dropout = nn.Dropout(p=args.droprate)
+        
+        self.expression_proj = nn.Sequential(
+            nn.Linear(blocks[-1][0], 32),
+            nn.LayerNorm(32),
+            nn.ELU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(32, 16),
+            nn.LayerNorm(16),
+            nn.ELU(),
+            nn.Linear(16, 1)
+        )
+        
+    def forward(self, x):
+        identity = x
+        
+        # ST-Blocks processing
+        x = self.st_blocks(x)
+        
+        batch_size, features, time_steps, nodes = x.shape
+        x_lstm = x.permute(0, 3, 2, 1)  # [batch, nodes, time_steps, features]
+        x_lstm = x_lstm.reshape(batch_size * nodes, time_steps, features)
+        
+        lstm_out, _ = self.lstm(x_lstm)
+        lstm_out = self.lstm_proj(lstm_out)
+        lstm_out = lstm_out.reshape(batch_size, nodes, time_steps, features)
+        lstm_out = lstm_out.permute(0, 3, 2, 1)  # Back to [batch, features, time_steps, nodes]
+        
+        # Residual connection with ST-Blocks output
+        x = x + lstm_out
+        x = self.lstm_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        
+        if self.Ko > 1:
+            x = self.output(x)
+        elif self.Ko == 0:
+            x = self.fc1(x.permute(0, 2, 3, 1))
+            x = self.relu(x)
+            x = self.dropout(x)
+            x = self.fc2(x).permute(0, 3, 1, 2)
+
+        # Attention mechanism
+        x = x.permute(0, 2, 3, 1)  # [batch, time_steps, nodes, features]
+        learned_attention = self.connectivity_attention(x)
+        
+        connectivity_weights = self.connection_weights.view(1, 1, -1, 1)
+        attention = (learned_attention * (1.0 + self.attention_scale * connectivity_weights))
+        attention = F.layer_norm(attention, [attention.size(-1)])
+        
+        x = x * attention + 0.1 * x  # Residual connection
+        
+        # Final projection
         x = self.expression_proj(x)
         x = x.permute(0, 3, 1, 2)
         
