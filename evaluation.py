@@ -168,6 +168,150 @@ def analyze_gene(model, val_sequences, val_labels, dataset):
     
     return mean_corr
 
+def analyze_gene_characteristics(dataset, high_corr_genes, low_corr_genes):
+    hic_stats = {}
+    expr_stats = {}
+    
+    for gene in high_corr_genes + low_corr_genes:
+        gene_rows = dataset.df[
+            (dataset.df['Gene1_clean'] == gene) | 
+            (dataset.df['Gene2_clean'] == gene)
+        ]
+        
+        if len(gene_rows) > 0:
+            hic_values = gene_rows['HiC_Interaction'].values
+
+            gene1_comps = gene_rows[gene_rows['Gene1_clean'] == gene]['Gene1_Compartment']
+            gene2_comps = gene_rows[gene_rows['Gene2_clean'] == gene]['Gene2_Compartment']
+            
+            compartment = gene1_comps.iloc[0] if len(gene1_comps) > 0 else gene2_comps.iloc[0]
+            
+            hic_stats[gene] = {
+                'mean_hic': np.mean(hic_values),
+                'std_hic': np.std(hic_values),
+                'max_hic': np.max(hic_values),
+                'compartment': compartment
+            }
+        else:
+            print(f"Warning: No HiC data found for gene {gene}")
+            hic_stats[gene] = {
+                'mean_hic': 0,
+                'std_hic': 0,
+                'max_hic': 0,
+                'compartment': 'Unknown'
+            }
+
+        expressions = []
+        for t in dataset.time_points:
+            gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+            gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+            
+            if len(gene1_expr) > 0:
+                expressions.append(gene1_expr[0])
+            elif len(gene2_expr) > 0:
+                expressions.append(gene2_expr[0])
+        
+        if expressions:
+            expr_stats[gene] = {
+                'expr_mean': np.mean(expressions),
+                'expr_std': np.std(expressions),
+                'expr_range': max(expressions) - min(expressions),
+                'expr_values': expressions
+            }
+        else:
+            print(f"Warning: No expression data found for gene {gene}")
+            expr_stats[gene] = {
+                'expr_mean': 0,
+                'expr_std': 0,
+                'expr_range': 0,
+                'expr_values': []
+            }
+    
+    return hic_stats, expr_stats
+
+def print_gene_analysis(dataset):
+    high_corr_genes = ['VIM', 'INMT', 'Tnc', 'ADAMTSL2', 'Shisa3', 'FGF18']
+    low_corr_genes = ['AMACR', 'ABCG2', 'MMP7', 'HPGDS', 'MGAT4A']
+    
+    print("\nAnalyzing gene characteristics...")
+    hic_stats, expr_stats = analyze_gene_characteristics(dataset, high_corr_genes, low_corr_genes)
+    
+    # Print detailed statistics for each group
+    print("\n=== High Correlation Genes Analysis ===")
+    print("=" * 50)
+    for gene in high_corr_genes:
+        print(f"\n{gene}:")
+        print("-" * 30)
+        print("HiC Statistics:")
+        print(f"  Mean: {hic_stats[gene]['mean_hic']:.2f}")
+        print(f"  Std:  {hic_stats[gene]['std_hic']:.2f}")
+        print(f"  Max:  {hic_stats[gene]['max_hic']:.2f}")
+        print(f"  Compartment: {hic_stats[gene]['compartment']}")
+        
+        print("Expression Statistics:")
+        print(f"  Mean: {expr_stats[gene]['expr_mean']:.2f}")
+        print(f"  Std:  {expr_stats[gene]['expr_std']:.2f}")
+        print(f"  Range: {expr_stats[gene]['expr_range']:.2f}")
+    
+    print("\n=== Low Correlation Genes Analysis ===")
+    print("=" * 50)
+    for gene in low_corr_genes:
+        print(f"\n{gene}:")
+        print("-" * 30)
+        print("HiC Statistics:")
+        print(f"  Mean: {hic_stats[gene]['mean_hic']:.2f}")
+        print(f"  Std:  {hic_stats[gene]['std_hic']:.2f}")
+        print(f"  Max:  {hic_stats[gene]['max_hic']:.2f}")
+        print(f"  Compartment: {hic_stats[gene]['compartment']}")
+        
+        print("Expression Statistics:")
+        print(f"  Mean: {expr_stats[gene]['expr_mean']:.2f}")
+        print(f"  Std:  {expr_stats[gene]['expr_std']:.2f}")
+        print(f"  Range: {expr_stats[gene]['expr_range']:.2f}")
+    
+    # Compare group statistics
+    print("\n=== Group Comparisons ===")
+    print("=" * 50)
+    
+    # HiC comparisons
+    high_mean_hic = np.mean([hic_stats[g]['mean_hic'] for g in high_corr_genes])
+    low_mean_hic = np.mean([hic_stats[g]['mean_hic'] for g in low_corr_genes])
+    
+    high_std_hic = np.mean([hic_stats[g]['std_hic'] for g in high_corr_genes])
+    low_std_hic = np.mean([hic_stats[g]['std_hic'] for g in low_corr_genes])
+    
+    print("\nHiC Comparison:")
+    print(f"High correlation genes average HiC: {high_mean_hic:.2f} ± {high_std_hic:.2f}")
+    print(f"Low correlation genes average HiC:  {low_mean_hic:.2f} ± {low_std_hic:.2f}")
+    
+    # Expression comparisons
+    high_mean_expr = np.mean([expr_stats[g]['expr_mean'] for g in high_corr_genes])
+    low_mean_expr = np.mean([expr_stats[g]['expr_mean'] for g in low_corr_genes])
+    
+    high_std_expr = np.mean([expr_stats[g]['expr_std'] for g in high_corr_genes])
+    low_std_expr = np.mean([expr_stats[g]['expr_std'] for g in low_corr_genes])
+    
+    print("\nExpression Comparison:")
+    print(f"High correlation genes average expression: {high_mean_expr:.2f} ± {high_std_expr:.2f}")
+    print(f"Low correlation genes average expression:  {low_mean_expr:.2f} ± {low_std_expr:.2f}")
+    
+    # Compartment analysis
+    high_comps = [hic_stats[g]['compartment'] for g in high_corr_genes]
+    low_comps = [hic_stats[g]['compartment'] for g in low_corr_genes]
+    
+    print("\nCompartment Distribution:")
+    print("High correlation genes:")
+    for comp in set(high_comps):
+        count = high_comps.count(comp)
+        print(f"  Compartment {comp}: {count} genes ({count/len(high_comps)*100:.1f}%)")
+    
+    print("Low correlation genes:")
+    for comp in set(low_comps):
+        count = low_comps.count(comp)
+        print(f"  Compartment {comp}: {count} genes ({count/len(low_comps)*100:.1f}%)")
+    
+    return hic_stats, expr_stats
+
 def calculate_temporal_metrics(true_values, predicted_values):
 
     metrics = {}
@@ -506,6 +650,26 @@ def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequenc
     plt.legend()
     #plt.show()
     plt.savefig('plottings_STGCN/expr_values_negative_corel_genes')
+    plt.close()
+
+    best_genes = ['VIM', 'INMT', 'Tnc', 'ADAMTSL2', 'Shisa3']
+    for gene in best_genes:
+        expressions = []
+        for t in dataset.time_points:
+            gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+            gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+            expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                        (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+            expressions.append(expr_value)
+        
+        plt.plot(dataset.time_points, expressions, label=gene)
+
+    plt.xlabel('Time Points')
+    plt.ylabel('Expression Value')
+    plt.title('Expression Profiles of Best Correlated Genes')
+    plt.legend()
+    #plt.show()
+    plt.savefig('plottings_STGCN/expr_values_best_corel_genes')
     plt.close()
 
     plot_connected_genes_expression(dataset, 'AMACR')
