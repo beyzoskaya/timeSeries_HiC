@@ -73,7 +73,7 @@ class TemporalGraphDataset:
         print("Base graph created")
         #self.node_features = self.create_temporal_node_features_several_graphs_created_clustering() # try with several graphs for time series consistency
         self.node_features, self.temporal_edge_indices, self.temporal_edge_attrs = \
-        self.create_temporal_node_features_several_graphs_created_clustering()
+        self.create_temporal_node_features_several_graphs_created_clustering_closeness_betweenness()
         print("Temporal node features created")
         
         # Get edge information
@@ -324,7 +324,7 @@ class TemporalGraphDataset:
                 i, j = self.node_map[gene1], self.node_map[gene2]
                 edge_index.extend([[i, j], [j, i]])
                 edge_weights.extend([weight, weight])
-            
+          
             # Create Node2Vec embeddings with cluster-aware weights
             node2vec = Node2Vec(
                 G,
@@ -350,18 +350,178 @@ class TemporalGraphDataset:
             for gene in self.node_map.keys():
                 # Get Node2Vec embedding
                 node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
+
+                print(f"\n{gene} embedding analysis:")
+                print(f"Original last dimension value: {node_embedding[-1]:.4f}")
+
+                orig_mean = node_embedding.mean().item()
+                orig_std = node_embedding.std().item()
                 
                 # Normalize embedding
                 node_embedding = (node_embedding - node_embedding.min()) / (node_embedding.max() - node_embedding.min() + 1e-8)
+                print(f"Normalized last dimension value: {node_embedding[-1]:.4f}")
+                print(f"Expression value to be inserted: {expression_values[gene]:.4f}")
+                orig_last_dim = node_embedding[-1].item()
                 
                 # Last dimension is the normalized expression value
                 if gene in ["AMACR", "ABCG2", "HPGDS"]: 
                    node_embedding[-1] = expression_values[gene] * 2.0 #scale negative correlated genes more higher value
-                   print(f"Expression value of embedding from negative corel {gene}: {node_embedding[-1]}")
+                   #print(f"Expression value of embedding from negative corel {gene}: {node_embedding[-1]}")
+                else:
+                    print(f"Node embeddings last dim before adding expression value: {node_embedding[-1]}")
+                    node_embedding[-1] = expression_values[gene]
+                    print(f"Node embeddings last dim after adding expression value: {node_embedding[-1]}")
+                    #print(f"Expression value for {gene}: {node_embedding[-1]}")
+                
+                print(f"Statistics before override:")
+                print(f"  Mean: {orig_mean:.4f}")
+                print(f"  Std: {orig_std:.4f}")
+                print(f"  Last dim: {orig_last_dim:.4f}")
+                print(f"Statistics after override:")
+                print(f"  Mean: {node_embedding.mean().item():.4f}")
+                print(f"  Std: {node_embedding.std().item():.4f}")
+                print(f"  Last dim: {node_embedding[-1].item():.4f}")
+                print('*************************************************************')
+               
+                features.append(node_embedding)
+            
+            temporal_features[t] = torch.stack(features)
+            temporal_edge_indices[t] = torch.tensor(edge_index).t().contiguous()
+            temporal_edge_attrs[t] = torch.tensor(edge_weights, dtype=torch.float32).unsqueeze(1)
+
+            print(f"\nFeature Statistics for time {t}:")
+            print(f"Expression range: [{min(expression_values.values()):.4f}, {max(expression_values.values()):.4f}]")
+            print(f"Embedding range: [{temporal_features[t].min():.4f}, {temporal_features[t].max():.4f}]")
+            
+        return temporal_features, temporal_edge_indices, temporal_edge_attrs
+
+    def create_temporal_node_features_several_graphs_created_clustering_closeness_betweenness(self):
+        temporal_features = {}
+        temporal_edge_indices = {}
+        temporal_edge_attrs = {}
+
+        clusters, _ = analyze_expression_levels_research(self)
+        gene_clusters = {}
+        for cluster_name, genes in clusters.items():
+            for gene in genes:
+                gene_clusters[gene] = cluster_name
+        
+        print("\nNormalizing expression values across all time points...")
+        all_expressions = []
+        for t in self.time_points:
+            for gene in self.node_map.keys():
+                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                all_expressions.append(expr_value)
+        
+        global_min = min(all_expressions)
+        global_max = max(all_expressions)
+        print(f"Global expression range: [{global_min:.4f}, {global_max:.4f}]")
+        
+        for t in self.time_points:
+            print(f"\nProcessing time point {t}")
+            
+            expression_values = {}
+            for gene in self.node_map.keys():
+                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                expression_values[gene] = (expr_value - global_min) / (global_max - global_min)
+            
+            G = nx.Graph()
+            G.add_nodes_from(self.node_map.keys())
+        
+            edge_index = []
+            edge_weights = []
+
+            for _, row in self.df.iterrows():
+                gene1 = row['Gene1_clean']
+                gene2 = row['Gene2_clean']
+                
+                hic_weight = row['HiC_Interaction']
+                compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
+
+                initial_weight = hic_weight * 0.7 + compartment_sim * 0.3
+                G.add_edge(gene1, gene2, weight=initial_weight)
+
+            closeness = nx.closeness_centrality(G, distance='weight')
+            max_close = max(closeness.values())
+            
+            if max_close == 0:
+                print("Warning: All closeness centralities are zero, using raw values")
+
+            norm_closeness = {k: v/max_close for k, v in closeness.items()}
+
+            print(f"\nCloseness Statistics for time point {t}:")
+            print(f"Closeness range: [{min(closeness.values()):.4f}, {max(closeness.values()):.4f}]")
+
+            edge_index = []
+            edge_weights = []
+            for _, row in self.df.iterrows():
+                gene1 = row['Gene1_clean']
+                gene2 = row['Gene2_clean']
+                
+                expr_sim = 1 / (1 + abs(expression_values[gene1] - expression_values[gene2]))
+                hic_weight = row['HiC_Interaction']
+                compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
+                tad_dist = abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance'])
+                tad_sim = 1 / (1 + tad_dist)
+                ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
+                
+                closeness_sim = (norm_closeness[gene1] + norm_closeness[gene2])/2
+                
+                cluster_sim = 1.2 if gene_clusters[gene1] == gene_clusters[gene2] else 1.0
+                if gene1 in ["AMACR", "ABCG2", "HPGDS"] or gene2 in ["AMACR", "ABCG2", "HPGDS"]:
+                    weight = (hic_weight * 0.15 +  
+                            compartment_sim * 0.1 +
+                            tad_sim * 0.1 +
+                            ins_sim * 0.1 +
+                            expr_sim * 0.4 +
+                            closeness_sim * 0.15) * 2.0
+                else:
+                    weight = (hic_weight * 0.25 +
+                            compartment_sim * 0.1 +
+                            tad_sim * 0.1 +
+                            ins_sim * 0.1 +
+                            expr_sim * 0.3 +
+                            closeness_sim * 0.15) * cluster_sim
+                
+                G.add_edge(gene1, gene2, weight=weight)
+                i, j = self.node_map[gene1], self.node_map[gene2]
+                edge_index.extend([[i, j], [j, i]])
+                edge_weights.extend([weight, weight])
+            
+            node2vec = Node2Vec(
+                G,
+                dimensions=self.embedding_dim,
+                walk_length=10,
+                num_walks=25,
+                p=1.0,
+                q=1.0,
+                workers=1,
+                seed=42
+            )
+            
+            model = node2vec.fit(
+                window=5,
+                min_count=1,
+                batch_words=4
+            )
+            
+            features = []
+            for gene in self.node_map.keys():
+                node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
+                
+                node_embedding = (node_embedding - node_embedding.min()) / (node_embedding.max() - node_embedding.min() + 1e-8)
+                
+                if gene in ["AMACR", "ABCG2", "HPGDS"]: 
+                    node_embedding[-1] = expression_values[gene] * 2.0
                 else:
                     node_embedding[-1] = expression_values[gene]
-                    print(f"Expression value for {gene}: {node_embedding[-1]}")
-                
+                    
                 features.append(node_embedding)
             
             temporal_features[t] = torch.stack(features)
