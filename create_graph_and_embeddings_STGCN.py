@@ -19,13 +19,25 @@ sys.path.append('./STGCN')
 from STGCN.model.models import STGCNChebGraphConv
 import argparse
 from scipy.spatial.distance import cdist
-from ontology_analysis import analyze_expression_levels_kmeans, analyze_expression_levels
+from ontology_analysis import analyze_expression_levels_research
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
     if pd.isna(gene_name):
         return gene_name
     return gene_name.split('(')[0].strip()
+
+def normalize_hic_weights(hic_values):
+    # small constant to avoid log(0)
+    eps = 1e-6
+    
+    # Log transformation to handle large variations
+    log_weights = np.log1p(hic_values + eps)
+    
+    # Min-max scaling to [0,1]
+    normalized = (log_weights - np.min(log_weights)) / (np.max(log_weights) - np.min(log_weights) + eps)
+    
+    return normalized
 
 class TemporalGraphDataset:
     def __init__(self, csv_file, embedding_dim=32, seq_len=3, pred_len=1, graph_params=None, node2vec_params=None): # I change the seq_len to more lower value
@@ -216,8 +228,13 @@ class TemporalGraphDataset:
         temporal_edge_indices = {}
         temporal_edge_attrs = {}
 
+        #hic_values = self.df['HiC_Interaction'].values
+        #normalized_hic = normalize_hic_weights(hic_values)
+        #hic_mapping = dict(zip(range(len(hic_values)), normalized_hic))
+
         # First, get cluster information
-        clusters, _ = analyze_expression_levels_kmeans(self)
+        clusters, _ = analyze_expression_levels_research(self)
+        #clusters, _ = analyze_expression_levels_hierarchical(self)
         gene_clusters = {}
         for cluster_name, genes in clusters.items():
             for gene in genes:
@@ -259,6 +276,7 @@ class TemporalGraphDataset:
             edge_index = []
             edge_weights = []
             for _, row in self.df.iterrows():
+                #hic_weight = hic_mapping[idx]
                 gene1 = row['Gene1_clean']
                 gene2 = row['Gene2_clean']
                 
@@ -270,7 +288,7 @@ class TemporalGraphDataset:
                 tad_sim = 1 / (1 + tad_dist)
                 ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
                 
-                # Add cluster similarity component
+                # cluster similarity component
                 cluster_sim = 1.2 if gene_clusters[gene1] == gene_clusters[gene2] else 1.0
 
                 """
@@ -287,12 +305,20 @@ class TemporalGraphDataset:
                 #         tad_sim * 0.05865 +
                 #         ins_sim * 0.053658 +
                 #         expr_sim * 0.44436) * cluster_sim
-                
-                weight = (hic_weight * 0.3 +
-                          compartment_sim * 0.1 +
-                          tad_sim * 0.1 +
-                          ins_sim * 0.1 +
-                          expr_sim * 0.4) * cluster_sim
+
+                # Artificially increase connection strength for negative correlated genes
+                if gene1 in ["AMACR", "ABCG2", "HPGDS"] or gene2 in ["AMACR", "ABCG2", "HPGDS"]:
+                    weight = (hic_weight * 0.2 +  
+                            compartment_sim * 0.1 +
+                            tad_sim * 0.1 +
+                            ins_sim * 0.1 +
+                            expr_sim * 0.6) * 2.0
+                else:
+                    weight = (hic_weight * 0.3 +
+                            compartment_sim * 0.1 +
+                            tad_sim * 0.1 +
+                            ins_sim * 0.1 +
+                            expr_sim * 0.4) * cluster_sim
                 
                 G.add_edge(gene1, gene2, weight=weight)
                 i, j = self.node_map[gene1], self.node_map[gene2]
@@ -304,7 +330,7 @@ class TemporalGraphDataset:
                 G,
                 dimensions=self.embedding_dim,
                 walk_length=10,
-                num_walks=20,
+                num_walks=25,
                 p=1.0,
                 q=1.0,
                 #p=1.739023,
@@ -329,15 +355,19 @@ class TemporalGraphDataset:
                 node_embedding = (node_embedding - node_embedding.min()) / (node_embedding.max() - node_embedding.min() + 1e-8)
                 
                 # Last dimension is the normalized expression value
-                node_embedding[-1] = expression_values[gene]
+                if gene in ["AMACR", "ABCG2", "HPGDS"]: 
+                   node_embedding[-1] = expression_values[gene] * 2.0 #scale negative correlated genes more higher value
+                   print(f"Expression value of embedding from negative corel {gene}: {node_embedding[-1]}")
+                else:
+                    node_embedding[-1] = expression_values[gene]
+                    print(f"Expression value for {gene}: {node_embedding[-1]}")
                 
                 features.append(node_embedding)
             
             temporal_features[t] = torch.stack(features)
             temporal_edge_indices[t] = torch.tensor(edge_index).t().contiguous()
             temporal_edge_attrs[t] = torch.tensor(edge_weights, dtype=torch.float32).unsqueeze(1)
-            
-            # Print diagnostics
+
             print(f"\nFeature Statistics for time {t}:")
             print(f"Expression range: [{min(expression_values.values()):.4f}, {max(expression_values.values()):.4f}]")
             print(f"Embedding range: [{temporal_features[t].min():.4f}, {temporal_features[t].max():.4f}]")
@@ -399,8 +429,7 @@ class TemporalGraphDataset:
                     expr_value = 0.0
                     
                 gene_expressions[t][gene] = expr_value
-        
-        # Debug print for verification
+
         print("\nExpression value check:")
         for t in self.time_points[:3]:  # First 3 time points
             print(f"\nTime point {t}:")
