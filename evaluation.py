@@ -340,6 +340,33 @@ def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequenc
         
         return predictions, targets
     
+    def plot_connected_genes_expression(dataset, target_gene):
+        connected_genes = set()
+        for _, row in dataset.df.iterrows():
+            if row['Gene1_clean'] == target_gene:
+                connected_genes.add(row['Gene2_clean'])
+            elif row['Gene2_clean'] == target_gene:
+                connected_genes.add(row['Gene1_clean'])
+
+        plt.figure(figsize=(10, 6))
+        for gene in [target_gene] + list(connected_genes):
+            expressions = []
+            for t in dataset.time_points:
+                gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                expressions.append(expr_value)
+            
+            plt.plot(dataset.time_points, expressions, label=gene)
+        
+        plt.xlabel('Time Points')
+        plt.ylabel('Expression Value')
+        plt.title(f'Expression Profiles for {target_gene} and Connected Genes')
+        plt.legend()
+        plt.savefig(f'plottings_STGCN/{target_gene}_connected_genes.png')
+        plt.close()
+    
     print("Getting training predictions...")
     train_pred, train_true = get_predictions_for_plotting(model, train_sequences, train_labels)
     print(f"Training predictions shape: {train_pred.shape}")
@@ -459,6 +486,31 @@ def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequenc
     plt.title('Distribution of Gene Connections')
     plt.savefig('plottings_STGCN/connection_distribution.png')
     plt.close()
+
+    neg_genes = ['HPGDS', 'ABCG2', 'AMACR']
+    for gene in neg_genes:
+        expressions = []
+        for t in dataset.time_points:
+            #print(f"Length of time points: {len(dataset.time_points)} ")
+            gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+            gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+            expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                        (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+            expressions.append(expr_value)
+        
+        plt.plot(dataset.time_points, expressions, label=gene)
+
+    plt.xlabel('Time Points')
+    plt.ylabel('Expression Value')
+    plt.title('Expression Profiles of Negatively Correlated Genes')
+    plt.legend()
+    #plt.show()
+    plt.savefig('plottings_STGCN/expr_values_negative_corel_genes')
+    plt.close()
+
+    plot_connected_genes_expression(dataset, 'AMACR')
+    plot_connected_genes_expression(dataset, 'ABCG2')
+    plot_connected_genes_expression(dataset, 'HPGDS')
 
     print("\nSummary Statistics:")
     print(f"Mean Training Correlation: {np.mean([m['train_corr'] for m in gene_metrics.values()]):.4f}")
