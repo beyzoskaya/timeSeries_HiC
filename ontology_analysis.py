@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
+from sklearn.cluster import AgglomerativeClustering
 
 def analyze_expression_levels(dataset):
     genes = list(dataset.node_map.keys())
@@ -163,6 +164,61 @@ def analyze_expression_levels_research(dataset):
             print("No genes in this cluster.")
 
     return clusters, gene_expressions
+
+def analyze_expression_levels_hierarchical(dataset, n_clusters=3):
+    genes = list(dataset.node_map.keys())
+    gene_expressions = {}
+
+    for gene in genes:
+        expressions = []
+        for t in dataset.time_points:
+            gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+            gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+            expr_values = np.concatenate([gene1_expr, gene2_expr])
+            expressions.extend(expr_values)
+
+        mean_expr = np.mean(expressions)
+        gene_expressions[gene] = mean_expr
+    
+    feature_matrix = []
+    for gene in genes:
+        expressions = []
+        for t in dataset.time_points:
+            gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+            gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+            expr_values = np.concatenate([gene1_expr, gene2_expr])
+            expressions.extend(expr_values)
+        
+        mean = np.mean(expressions)
+        std_dev = np.std(expressions)
+        var = np.var(expressions)
+
+        feature_matrix.append([mean, std_dev, var])
+    feature_matrix = np.array(feature_matrix)
+
+    clustering = AgglomerativeClustering(n_clusters=n_clusters)
+    cluster_labels = clustering.fit_predict(feature_matrix)
+    clusters = {'high_expr': [], 'medium_expr': [], 'low_expr': []}
+
+    for i, label in enumerate(cluster_labels):
+        if label == 0:
+            clusters['low_expr'].append(genes[i])
+        elif label == 1:
+            clusters['medium_expr'].append(genes[i])
+        else:
+            clusters['high_expr'].append(genes[i])
+
+    print("\nHierarchical Clustering Expression Cluster Analysis:")
+    for cluster_name, genes_in_cluster in clusters.items():
+        mean_cluster_expr = np.mean([gene_expressions[g] for g in genes_in_cluster])
+        print(f"\n{cluster_name.upper()} Expression Cluster:")
+        print(f"Number of genes: {len(genes_in_cluster)}")
+        print(f"Average expression: {mean_cluster_expr:.4f}")
+        print("Genes:", ', '.join(genes_in_cluster[:5]), "..." if len(genes_in_cluster) > 5 else "")
+
+    return clusters, gene_expressions
+
+
 
 
 
