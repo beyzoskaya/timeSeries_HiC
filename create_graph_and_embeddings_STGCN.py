@@ -19,7 +19,7 @@ sys.path.append('./STGCN')
 from STGCN.model.models import STGCNChebGraphConv
 import argparse
 from scipy.spatial.distance import cdist
-from ontology_analysis import analyze_expression_levels_research
+from ontology_analysis import analyze_expression_levels_research, analyze_expression_levels_kmeans
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -229,7 +229,7 @@ class TemporalGraphDataset:
         temporal_edge_attrs = {}
 
         clusters, _ = analyze_expression_levels_research(self)
-        #clusters, _ = analyze_expression_levels_hierarchical(self)
+        #clusters, _ = analyze_expression_levels_kmeans(self)
         gene_clusters = {}
         for cluster_name, genes in clusters.items():
             for gene in genes:
@@ -238,6 +238,8 @@ class TemporalGraphDataset:
         # normalize all expression values across all time points
         print("\nNormalizing expression values across all time points...")
         all_expressions = []
+        high_expr = []
+        low_expr = []
         for t in self.time_points:
             for gene in self.node_map.keys():
                 gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
@@ -245,12 +247,14 @@ class TemporalGraphDataset:
                 expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
                             (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
                 all_expressions.append(expr_value)
-        
+
         # Global normalization parameters
         global_min = min(all_expressions)
         global_max = max(all_expressions)
         print(f"Global expression range: [{global_min:.4f}, {global_max:.4f}]")
-        
+
+        low_corr_genes = ['AMACR', 'ABCG2', 'MMP7', 'HPGDS', 'MGAT4A']
+
         for t in self.time_points:
             print(f"\nProcessing time point {t}")
             
@@ -266,8 +270,6 @@ class TemporalGraphDataset:
             G = nx.Graph()
             G.add_nodes_from(self.node_map.keys())
 
-            low_corr_genes = ['AMACR', 'ABCG2', 'MMP7', 'HPGDS', 'MGAT4A']
-            
             # Add edges with cluster-aware weights
             edge_index = []
             edge_weights = []
@@ -282,28 +284,15 @@ class TemporalGraphDataset:
                     hic_weight = np.log1p(row['HiC_Interaction'])  # Log transform for the low correlated genes
                 else:
                     hic_weight = row['HiC_Interaction'] 
-                compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
+            
+                compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0 
+
                 tad_dist = abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance'])
                 tad_sim = 1 / (1 + tad_dist)
                 ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
                 
                 # cluster similarity component
                 cluster_sim = 1.2 if gene_clusters[gene1] == gene_clusters[gene2] else 1.0
-
-                """
-                Original version for training
-                weight = (
-                hic_weight * self.graph_params.get('hic_weight', 0.3) +
-                compartment_sim * self.graph_params.get('compartment_weight', 0.1) +
-                tad_sim * self.graph_params.get('tad_weight', 0.05) +
-                ins_sim * self.graph_params.get('ins_weight', 0.05)
-            ) * cluster_sim
-                """
-                # weight = (hic_weight * 0.263912 +
-                #         compartment_sim * 0.120981 +
-                #         tad_sim * 0.05865 +
-                #         ins_sim * 0.053658 +
-                #         expr_sim * 0.44436) * cluster_sim
 
                 # Artificially increase connection strength for negative correlated genes
                 if gene1 in ["AMACR", "ABCG2", "HPGDS"] or gene2 in ["AMACR", "ABCG2", "HPGDS"]:
@@ -357,8 +346,8 @@ class TemporalGraphDataset:
                 orig_std = node_embedding.std().item()
                 
                 # Normalize embedding
-                node_embedding = (node_embedding - node_embedding.min()) / (node_embedding.max() - node_embedding.min() + 1e-8)
-                print(f"Normalized last dimension value: {node_embedding[-1]:.4f}")
+                #node_embedding = (node_embedding - node_embedding.min()) / (node_embedding.max() - node_embedding.min() + 1e-8) #FIXME Normalization of embeddings not affect performance in a good way
+                #print(f"Normalized last dimension value: {node_embedding[-1]:.4f}")
                 print(f"Expression value to be inserted: {expression_values[gene]:.4f}")
                 orig_last_dim = node_embedding[-1].item()
                 
