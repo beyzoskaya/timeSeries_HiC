@@ -7,6 +7,8 @@ from scipy.stats import pearsonr
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.spatial.distance import cdist
 import seaborn as sns
+import pandas as pd
+from create_graph_and_embeddings_STGCN import clean_gene_name
 
 def analyze_temporal_patterns(model, val_sequences, val_labels, dataset, save_dir = 'temporal_analysis'):
     os.makedirs(save_dir, exist_ok=True)
@@ -179,7 +181,10 @@ def analyze_gene_characteristics(dataset, high_corr_genes, low_corr_genes):
         ]
         
         if len(gene_rows) > 0:
-            hic_values = gene_rows['HiC_Interaction'].values
+            if gene in low_corr_genes:
+                hic_values = np.log1p(gene_rows['HiC_Interaction'].values)
+            else:
+                hic_values = gene_rows['HiC_Interaction'].values
 
             gene1_comps = gene_rows[gene_rows['Gene1_clean'] == gene]['Gene1_Compartment']
             gene2_comps = gene_rows[gene_rows['Gene2_clean'] == gene]['Gene2_Compartment']
@@ -485,31 +490,59 @@ def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequenc
         return predictions, targets
     
     def plot_connected_genes_expression(dataset, target_gene):
-        connected_genes = set()
+        original_connections = set()
+        original_df = pd.read_csv('mapped/enhanced_interactions_new_new.csv')
+        original_df['Gene1_clean'] = original_df['Gene1'].apply(clean_gene_name)
+        original_df['Gene2_clean'] = original_df['Gene2'].apply(clean_gene_name)
+
+        for _, row in original_df.iterrows():
+            if row['Gene1_clean'] == target_gene:
+                original_connections.add(row['Gene2_clean'])
+            elif row['Gene2_clean'] == target_gene:
+                original_connections.add(row['Gene1_clean'])
+                
+        print(f"Original connections: {original_connections}")
+        
+        all_connections = set()
         for _, row in dataset.df.iterrows():
             if row['Gene1_clean'] == target_gene:
-                connected_genes.add(row['Gene2_clean'])
+                all_connections.add(row['Gene2_clean'])
             elif row['Gene2_clean'] == target_gene:
-                connected_genes.add(row['Gene1_clean'])
-
+                all_connections.add(row['Gene1_clean'])
+                
+        synthetic_connections = all_connections - original_connections
+        print(f"Synthetic connections: {synthetic_connections}")
+        
         plt.figure(figsize=(10, 6))
-        for gene in [target_gene] + list(connected_genes):
-            expressions = []
-            for t in dataset.time_points:
-                gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
-                gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
-                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
-                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
-                expressions.append(expr_value)
+        
+        expressions = get_gene_expressions(dataset, target_gene)
+        plt.plot(dataset.time_points, expressions, label=target_gene, linewidth=2)
+        
+        for gene in original_connections:
+            expressions = get_gene_expressions(dataset, gene)
+            plt.plot(dataset.time_points, expressions, label=f"{gene} (original)", linewidth=2)
             
-            plt.plot(dataset.time_points, expressions, label=gene)
+        for gene in synthetic_connections:
+            expressions = get_gene_expressions(dataset, gene)
+            plt.plot(dataset.time_points, expressions, label=f"{gene} (synthetic)", 
+                    linewidth=1.5, linestyle='--')
         
         plt.xlabel('Time Points')
         plt.ylabel('Expression Value')
-        plt.title(f'Expression Profiles for {target_gene} and Connected Genes')
+        plt.title(f'Expression Profiles for {target_gene}: Original vs Synthetic Connections')
         plt.legend()
+        plt.grid(True, alpha=0.3)
         plt.savefig(f'plottings_STGCN/{target_gene}_connected_genes.png')
         plt.close()
+
+    def get_gene_expressions(dataset, gene):
+        expressions = []
+        for t in dataset.time_points:
+            gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+            gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+            expr_value = gene1_expr[0] if len(gene1_expr) > 0 else gene2_expr[0] if len(gene2_expr) > 0 else np.nan
+            expressions.append(expr_value)
+        return expressions
     
     print("Getting training predictions...")
     train_pred, train_true = get_predictions_for_plotting(model, train_sequences, train_labels)
@@ -672,7 +705,7 @@ def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequenc
     plt.savefig('plottings_STGCN/expr_values_best_corel_genes')
     plt.close()
 
-    plot_connected_genes_expression(dataset, 'AMACR')
+    plot_connected_genes_expression(dataset, 'AMACR') # E2F8 and TGFB1 genes have same expression values for the AMACR
     plot_connected_genes_expression(dataset, 'ABCG2')
     plot_connected_genes_expression(dataset, 'HPGDS')
 
