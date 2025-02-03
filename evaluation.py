@@ -9,6 +9,7 @@ from scipy.spatial.distance import cdist
 import seaborn as sns
 import pandas as pd
 from create_graph_and_embeddings_STGCN import clean_gene_name
+import networkx as nx
 
 def analyze_temporal_patterns(model, val_sequences, val_labels, dataset, save_dir = 'temporal_analysis'):
     os.makedirs(save_dir, exist_ok=True)
@@ -723,3 +724,41 @@ def create_gene_analysis_plots(model, train_sequences, train_labels, val_sequenc
             print(f"Validation RMSE: {gene_metrics[gene]['val_rmse']:.4f}")
     
     return gene_metrics
+
+def plot_graph_at_timepoint(dataset, time_point):
+    G = nx.Graph()
+    G.add_nodes_from(dataset.node_map.keys())
+    
+    for _, row in dataset.df.iterrows():
+        gene1 = row['Gene1_clean']
+        gene2 = row['Gene2_clean']
+        
+        gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene1][f'Gene1_Time_{time_point}'].values
+        gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene2][f'Gene2_Time_{time_point}'].values
+        
+        expr1 = gene1_expr[0] if len(gene1_expr) > 0 else 0
+        expr2 = gene2_expr[0] if len(gene2_expr) > 0 else 0
+
+        G.nodes[gene1]['expression'] = expr1
+        G.nodes[gene2]['expression'] = expr2
+        
+        G.add_edge(gene1, gene2, weight=row['HiC_Interaction'])
+
+    plt.figure(figsize=(15, 15))
+    
+    pos = nx.spring_layout(G)
+    
+    node_colors = [G.nodes[node].get('expression', 0) for node in G.nodes()]
+    nodes = nx.draw_networkx_nodes(G, pos, node_color=node_colors, 
+                                 node_size=1000, cmap=plt.cm.viridis)
+    
+    edge_weights = [G[u][v]['weight']/500 for u, v in G.edges()]
+    nx.draw_networkx_edges(G, pos, width=edge_weights, alpha=0.5)
+    
+    nx.draw_networkx_labels(G, pos)
+    
+    plt.colorbar(nodes, label='Expression Value')
+    plt.title(f'Gene Interaction Network at Time Point {time_point}')
+    plt.axis('off')
+    plt.savefig(f'plottings_STGCN/network_t_{time_point}.png')
+    plt.close()
