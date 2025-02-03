@@ -73,7 +73,7 @@ class TemporalGraphDataset:
         print("Base graph created")
         #self.node_features = self.create_temporal_node_features_several_graphs_created_clustering() # try with several graphs for time series consistency
         self.node_features, self.temporal_edge_indices, self.temporal_edge_attrs = \
-        self.create_temporal_node_features_several_graphs_created_clustering_closeness_betweenness()
+        self.create_temporal_node_features_several_graphs_created_clustering()
         print("Temporal node features created")
         
         # Get edge information
@@ -228,11 +228,6 @@ class TemporalGraphDataset:
         temporal_edge_indices = {}
         temporal_edge_attrs = {}
 
-        #hic_values = self.df['HiC_Interaction'].values
-        #normalized_hic = normalize_hic_weights(hic_values)
-        #hic_mapping = dict(zip(range(len(hic_values)), normalized_hic))
-
-        # First, get cluster information
         clusters, _ = analyze_expression_levels_research(self)
         #clusters, _ = analyze_expression_levels_hierarchical(self)
         gene_clusters = {}
@@ -240,7 +235,7 @@ class TemporalGraphDataset:
             for gene in genes:
                 gene_clusters[gene] = cluster_name
         
-        # First, normalize all expression values across all time points
+        # normalize all expression values across all time points
         print("\nNormalizing expression values across all time points...")
         all_expressions = []
         for t in self.time_points:
@@ -259,7 +254,6 @@ class TemporalGraphDataset:
         for t in self.time_points:
             print(f"\nProcessing time point {t}")
             
-            # First get normalized expression values
             expression_values = {}
             for gene in self.node_map.keys():
                 gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
@@ -271,6 +265,8 @@ class TemporalGraphDataset:
             # Create graph using normalized expression values and cluster information
             G = nx.Graph()
             G.add_nodes_from(self.node_map.keys())
+
+            low_corr_genes = ['AMACR', 'ABCG2', 'MMP7', 'HPGDS', 'MGAT4A']
             
             # Add edges with cluster-aware weights
             edge_index = []
@@ -282,7 +278,10 @@ class TemporalGraphDataset:
                 
                 # Calculate edge weight components
                 expr_sim = 1 / (1 + abs(expression_values[gene1] - expression_values[gene2]))
-                hic_weight = row['HiC_Interaction']
+                if gene1 in low_corr_genes or gene2 in low_corr_genes:
+                    hic_weight = np.log1p(row['HiC_Interaction'])  # Log transform for the low correlated genes
+                else:
+                    hic_weight = row['HiC_Interaction'] 
                 compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
                 tad_dist = abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance'])
                 tad_sim = 1 / (1 + tad_dist)
@@ -449,7 +448,7 @@ class TemporalGraphDataset:
 
             closeness = nx.closeness_centrality(G, distance='weight')
             max_close = max(closeness.values())
-            
+
             if max_close == 0:
                 print("Warning: All closeness centralities are zero, using raw values")
 
