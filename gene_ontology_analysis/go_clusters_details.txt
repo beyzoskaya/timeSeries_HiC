@@ -1,0 +1,318 @@
+GO Term Clusters Analysis Details:
+
+Genes in order of clustering:
+TGFB1, ABCG2, Lrp2, ppia, Igfbp3, AGER, EPHA7, FGF18, Thy1, VIM, ABCA3, ywhaz, ABCD1, Tnc, tbp, F13A1, AMACR, ADAMTSL2, MMP7, NME3, PRIM2, hmbs, CD38, Kcnma1, MGAT4A, HPGDS, hprt, Claudin 1, N-Cadherin, SFTP-D, GUCY1A2  sGC, Claudin5, TTF-1, E2F8, FOXF2, MCPt4, RAGE, GATA-6, Vegf, THTPA, MMP-3, Hist1h2ab, integrin subunit alpha 8, Shisa3, INMT, Hist1h1b, P-63, tfrc, EGFR
+
+Terms in order of clustering:
+
+Term: regulation of apoptotic process (GO:0042981)
+Category: Biological Process
+P-value: 2.73e-02
+
+Term: focal adhesion (GO:0005925)
+Category: Cellular Component
+P-value: 1.54e-02
+
+Term: cell-substrate junction (GO:0030055)
+Category: Cellular Component
+P-value: 1.54e-02
+
+Term: regulation of ERK1 and ERK2 cascade (GO:0070372)
+Category: Biological Process
+P-value: 2.52e-02
+
+Term: positive regulation of gene expression (GO:0010628)
+Category: Biological Process
+P-value: 3.44e-02
+
+Term: positive regulation of protein kinase B signaling (GO:0051897)
+Category: Biological Process
+P-value: 2.94e-02
+
+Term: positive regulation of MAP kinase activity (GO:0043406)
+Category: Biological Process
+P-value: 2.94e-02
+
+Term: regulation of stress-activated MAPK cascade (GO:0032872)
+Category: Biological Process
+P-value: 2.52e-02
+
+Term: positive regulation of protein modification process (GO:0031401)
+Category: Biological Process
+P-value: 3.60e-03
+
+Term: positive regulation of protein phosphorylation (GO:0001934)
+Category: Biological Process
+P-value: 2.52e-02
+
+Term: regulation of protein phosphorylation (GO:0001932)
+Category: Biological Process
+P-value: 2.01e-04
+
+Term: positive regulation of phosphorylation (GO:0042327)
+Category: Biological Process
+P-value: 1.05e-03
+
+Term: intracellular organelle lumen (GO:0070013)
+Category: Cellular Component
+P-value: 9.01e-02
+
+Term: negative regulation of protein phosphorylation (GO:0001933)
+Category: Biological Process
+P-value: 2.94e-02
+
+Term: negative regulation of protein modification process (GO:0031400)
+Category: Biological Process
+P-value: 3.44e-02
+
+Term: negative regulation of phosphorylation (GO:0042326)
+Category: Biological Process
+P-value: 3.68e-02
+
+Term: organic substance transport (GO:0071702)
+Category: Biological Process
+P-value: 2.52e-02
+
+Term: fatty acid beta-oxidation using acyl-CoA oxidase (GO:0033540)
+Category: Biological Process
+P-value: 2.94e-02
+
+Term: peroxisome (GO:0005777)
+Category: Cellular Component
+P-value: 3.81e-02
+
+Term: metalloendopeptidase activity (GO:0004222)
+Category: Molecular Function
+P-value: 8.88e-02
+
+Term: membrane raft (GO:0045121)
+Category: Cellular Component
+P-value: 5.95e-02
+
+Term: GPI anchor binding (GO:0034235)
+Category: Molecular Function
+P-value: 8.88e-02
+
+Term: positive regulation of cellular extravasation (GO:0002693)
+Category: Biological Process
+P-value: 2.52e-02
+
+Term: positive regulation of heterotypic cell-cell adhesion (GO:0034116)
+Category: Biological Process
+P-value: 2.94e-02
+
+Term: protein-glutamine gamma-glutamyltransferase activity (GO:0003810)
+Category: Molecular Function
+P-value: 9.37e-02
+
+Term: platelet alpha granule lumen (GO:0031093)
+Category: Cellular Component
+P-value: 7.50e-02
+
+Term: platelet alpha granule (GO:0031091)
+Category: Cellular Component
+P-value: 9.51e-02
+
+Term: membrane protein intracellular domain proteolysis (GO:0031293)
+Category: Biological Process
+P-value: 3.68e-02
+
+Term: regulation of collagen biosynthetic process (GO:0032965)
+Category: Biological Process
+P-value: 3.44e-02
+
+Term: positive regulation of collagen biosynthetic process (GO:0032967)
+Category: Biological Process
+P-value: 2.94e-02
+
+Term: positive regulation of collagen metabolic process (GO:0010714)
+Category: Biological Process
+P-value: 3.16e-02
+
+Term: type II transforming growth factor beta receptor binding (GO:0005114)
+Category: Molecular Function
+P-value: 9.10e-02
+
+Term: type I transforming growth factor beta receptor binding (GO:0034713)
+Category: Molecular Function
+P-value: 9.37e-02
+
+Term: positive regulation of production of miRNAs involved in gene silencing by miRNA (GO:1903800)
+Category: Biological Process
+P-value: 2.52e-02
+
+Term: regulation of production of miRNAs involved in gene silencing by miRNA (GO:1903798)
+Category: Biological Process
+P-value: 3.28e-02
+
+Term: double-stranded RNA binding (GO:0003725)
+Category: Molecular Function
+P-value: 8.85e-02
+
+Term: keratin filament binding (GO:1990254)
+Category: Molecular Function
+P-value: 8.85e-02
+
+Term: negative regulation of developmental process (GO:0051093)
+Category: Biological Process
+P-value: 3.28e-02
+
+Term: positive regulation of isotype switching (GO:0045830)
+Category: Biological Process
+P-value: 2.94e-02
+
+Term: HFE-transferrin receptor complex (GO:1990712)
+Category: Cellular Component
+P-value: 9.51e-02
+
+Term: ephrin receptor activity (GO:0005003)
+Category: Molecular Function
+P-value: 9.89e-02
+
+Term: GPI-linked ephrin receptor activity (GO:0005004)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: transmembrane-ephrin receptor activity (GO:0005005)
+Category: Molecular Function
+P-value: 9.89e-02
+
+Term: regulation of peptidyl-tyrosine phosphorylation (GO:0050730)
+Category: Biological Process
+P-value: 3.85e-02
+
+Term: transmembrane receptor protein tyrosine kinase activity (GO:0004714)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: transmembrane receptor protein kinase activity (GO:0019199)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: insulin-like growth factor II binding (GO:0031995)
+Category: Molecular Function
+P-value: 8.88e-02
+
+Term: insulin-like growth factor I binding (GO:0031994)
+Category: Molecular Function
+P-value: 2.08e-02
+
+Term: insulin-like growth factor binding (GO:0005520)
+Category: Molecular Function
+P-value: 2.08e-02
+
+Term: alpha DNA polymerase:primase complex (GO:0005658)
+Category: Cellular Component
+P-value: 7.50e-02
+
+Term: nucleobase-containing compound kinase activity (GO:0019205)
+Category: Molecular Function
+P-value: 9.89e-02
+
+Term: RNA polymerase II general transcription initiation factor binding (GO:0001091)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: aryl hydrocarbon receptor binding (GO:0017162)
+Category: Molecular Function
+P-value: 9.10e-02
+
+Term: syndecan binding (GO:0045545)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: type 1 fibroblast growth factor receptor binding (GO:0005105)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: type 2 fibroblast growth factor receptor binding (GO:0005111)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: heme biosynthetic process (GO:0006783)
+Category: Biological Process
+P-value: 3.68e-02
+
+Term: brush border membrane (GO:0031526)
+Category: Cellular Component
+P-value: 3.81e-02
+
+Term: cell projection membrane (GO:0031253)
+Category: Cellular Component
+P-value: 9.51e-02
+
+Term: external side of apical plasma membrane (GO:0098591)
+Category: Cellular Component
+P-value: 7.50e-02
+
+Term: anion transmembrane transporter activity (GO:0008509)
+Category: Molecular Function
+P-value: 9.89e-02
+
+Term: riboflavin transmembrane transporter activity (GO:0032217)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: urate transmembrane transporter activity (GO:0015143)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: xenobiotic transport (GO:0042908)
+Category: Biological Process
+P-value: 3.44e-02
+
+Term: ABC-type xenobiotic transporter activity (GO:0008559)
+Category: Molecular Function
+P-value: 2.08e-02
+
+Term: alveolar lamellar body (GO:0097208)
+Category: Cellular Component
+P-value: 8.35e-02
+
+Term: phosphatidylcholine flippase activity (GO:0140345)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: phosphatidylcholine transfer activity (GO:0120019)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: ATP hydrolysis activity (GO:0140603)
+Category: Molecular Function
+P-value: 8.37e-02
+
+Term: acyl-CoA hydrolase activity (GO:0047617)
+Category: Molecular Function
+P-value: 9.89e-02
+
+Term: kinase binding (GO:0019900)
+Category: Molecular Function
+P-value: 9.89e-02
+
+Term: vesicle (GO:0031982)
+Category: Cellular Component
+P-value: 3.01e-02
+
+Term: vascular transport (GO:0010232)
+Category: Biological Process
+P-value: 9.44e-03
+
+Term: transport across blood-brain barrier (GO:0150104)
+Category: Biological Process
+P-value: 9.44e-03
+
+Term: endocytic vesicle membrane (GO:0030666)
+Category: Cellular Component
+P-value: 5.95e-02
+
+Term: clathrin-coated vesicle membrane (GO:0030665)
+Category: Cellular Component
+P-value: 2.24e-02
+
+Term: clathrin-coated endocytic vesicle membrane (GO:0030669)
+Category: Cellular Component
+P-value: 1.72e-02
+
+Term: clathrin-coated endocytic vesicle (GO:0045334)
+Category: Cellular Component
+P-value: 2.24e-02

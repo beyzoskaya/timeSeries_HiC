@@ -4,7 +4,8 @@ import json
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-
+from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+from scipy.spatial.distance import pdist, squareform
 
 """
 One of the main uses of the GO is to perform enrichment analysis on gene sets. 
@@ -204,6 +205,96 @@ def plot_gene_term_heatmap(results_dict, genes, min_pvalue=0.1, max_terms=20):
         print("Saved full term descriptions to 'go_terms_description.txt'")
     else:
         print("No significant associations found for heatmap")
+
+def plot_go_term_clusters(results_dict, genes, min_pvalue=0.1, max_terms=30):
+    term_info = []
+    gene_term_matrix = []
+
+    for category, df in results_dict.items():
+        if not df.empty:
+            significant_terms = df[df['Adjusted p-value'] < min_pvalue].sort_values('Adjusted p-value')
+            significant_terms = significant_terms.head(max_terms)
+            
+            for _, row in significant_terms.iterrows():
+                if isinstance(row['Overlapping genes'], str):
+                    overlapping_genes = row['Overlapping genes'].split(';')
+                else:
+                    overlapping_genes = row['Overlapping genes']
+                
+                overlapping_genes = [g.upper() for g in overlapping_genes]
+                genes_upper = [g.upper() for g in genes]
+                
+                gene_matches = [1 if gene in overlapping_genes else 0 for gene in genes_upper]
+                
+                if sum(gene_matches) > 0:
+                    term_info.append({
+                        'term': row['Term'],
+                        'category': category,
+                        'p_value': row['Adjusted p-value']
+                    })
+                    gene_term_matrix.append(gene_matches)
+    
+    if gene_term_matrix:
+        gene_term_matrix = np.array(gene_term_matrix)
+        
+        # Calculate linkage
+        gene_linkage = linkage(pdist(gene_term_matrix.T), method='average')
+        term_linkage = linkage(pdist(gene_term_matrix), method='average')
+        
+        plt.figure(figsize=(15, 10))
+        
+        ax_heatmap = plt.axes([0.3, 0.1, 0.6, 0.6])  # [left, bottom, width, height]
+        
+        gene_order = dendrogram(gene_linkage)['leaves']
+        term_order = dendrogram(term_linkage)['leaves']
+        
+        matrix_ordered = gene_term_matrix[term_order][:, gene_order]
+        
+        sns.heatmap(matrix_ordered,
+                   cmap='YlOrRd',
+                   cbar_kws={'label': 'Association'},
+                   ax=ax_heatmap)
+        
+        ordered_genes = [genes[i] for i in gene_order]
+        ordered_terms = [f"{term_info[i]['category'][:2]}: {term_info[i]['term'][:30]}..." 
+                        for i in term_order]
+        
+        ax_heatmap.set_xticks(np.arange(len(ordered_genes)) + 0.5)
+        ax_heatmap.set_yticks(np.arange(len(ordered_terms)) + 0.5)
+        
+        ax_heatmap.set_xticklabels(ordered_genes, rotation=45, ha='right')
+        ax_heatmap.set_yticklabels(ordered_terms, rotation=0)
+        
+        ax_dendro_top = plt.axes([0.3, 0.7, 0.48, 0.2])
+        dendrogram(gene_linkage, ax=ax_dendro_top)
+        ax_dendro_top.set_xticks([])
+        ax_dendro_top.set_yticks([])
+        
+        ax_dendro_left = plt.axes([0.1, 0.1, 0.2, 0.6])
+        dendrogram(term_linkage, orientation='left', ax=ax_dendro_left)
+        ax_dendro_left.set_xticks([])
+        ax_dendro_left.set_yticks([])
+        
+        plt.suptitle('GO Term and Gene Clusters', fontsize=14, y=0.95)
+        
+        plt.savefig('go_clusters.pdf', bbox_inches='tight', dpi=300)
+        plt.close()
+        
+        with open('go_clusters_details.txt', 'w') as f:
+            f.write("GO Term Clusters Analysis Details:\n\n")
+            f.write("Genes in order of clustering:\n")
+            f.write(", ".join(ordered_genes) + "\n\n")
+            f.write("Terms in order of clustering:\n")
+            for i in term_order:
+                term = term_info[i]
+                f.write(f"\nTerm: {term['term']}\n")
+                f.write(f"Category: {term['category']}\n")
+                f.write(f"P-value: {term['p_value']:.2e}\n")
+        
+        print("Generated cluster visualization")
+        print("Saved details to 'go_clusters_details.txt'")
+    else:
+        print("No significant associations found for clustering")
 
 def plot_enrichment_bubble(results_dict):
     plt.figure(figsize=(12, 8))
@@ -443,11 +534,13 @@ def run_mouse_go_analysis():
     #plot_enrichment_bubble(results)
     #print("plot_enrichment_bubble done!'")
     #plot_term_network(results, max_terms_per_category=5, min_pvalue=0.05)
-    plot_term_network(results, max_terms_per_category=8, min_pvalue=0.1)
-    print("plot_term_network done!'")
+    #plot_term_network(results, max_terms_per_category=8, min_pvalue=0.1)
+    #print("plot_term_network done!'")
     #plot_significance_distribution(results)
     #print("Visualizations saved as 'go_terms_barplot_negative_corel.pdf' and 'go_terms_volcano_negative_corel.pdf'")
+    plot_go_term_clusters(results, genes)
     print("New visualizations done!'")
+
     
     for name, df in results.items():
         print(f"\nTop {name} terms:")
