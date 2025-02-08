@@ -4,6 +4,8 @@ import json
 import requests
 from distinct_temporal_patterns_go import clean_gene_name
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 ENRICHR_URL = "https://maayanlab.cloud/Enrichr"
 
@@ -98,9 +100,9 @@ def analyze_compartments_with_go(df, databases=["GO_Biological_Process_2021", "G
                 go_results_both = get_enrichr_results(remaining_genes, db)
                 
                 if not go_results_both.empty:
-                    sheet_name = f"Compartment_B_{db.split('_')[1]}"
+                    sheet_name = f"Compartment_AB_{db.split('_')[1]}"
                     go_results_both.to_excel(writer, sheet_name=sheet_name, index=False)
-                    print(f"Saved GO results for Compartment B - {db} to Excel")
+                    print(f"Saved GO results for Compartment A and B - {db} to Excel")
 
                 compartment_both_results[db] = compartment_both_results
             
@@ -126,9 +128,72 @@ def run_compartment_go_analysis(csv_file):
 
     print("\nCompartment-based GO enrichment analysis completed!")
     print("Results saved in 'compartment_go_analysis.xlsx'")
+    
+def read_go_data(file_path, sheet_name):
+    df = pd.read_excel(file_path, sheet_name=sheet_name)
+    return df
+
+def plot_go_terms(df, compartment_name):
+    """
+    Top GO terms for each compartment
+    """
+    df_sorted = df.sort_values(by='Combined score', ascending=False).head(10)
+    plt.figure(figsize=(40, 12))
+    sns.barplot(y=df_sorted['Term'], x=df_sorted['Combined score'], palette='viridis')
+    plt.xlabel("Combined Score")
+    plt.ylabel("GO Term")
+    plt.title(f"Top Molecular Function GO Terms - {compartment_name}")
+    plt.gca().invert_yaxis()
+    #plt.show()
+    plt.savefig(f"GO_results_compartments/molecular_func_terms_{compartment_name}.pdf")
+
+def compare_compartments(df_A, df_B):
+    df_A['Compartment'] = 'A'
+    df_B['Compartment'] = 'B'
+    df_combined = pd.concat([df_A, df_B])
+    df_top = df_combined.sort_values(by='Combined score', ascending=False).head(10)
+    
+    plt.figure(figsize=(36, 12))
+    sns.barplot(x='Combined score', y='Term', hue='Compartment', data=df_top, palette=['blue', 'red'])
+    plt.xlabel("Combined Score")
+    plt.ylabel("GO Term")
+    plt.title("Comparison of GO Terms in Compartments A and B")
+    #plt.show()
+    plt.savefig("GO_results_compartments/go_terms_comparison_for_compartments.pdf")
+
+def plot_go_heatmap(df_a, df_b):
+    """
+    Identifies which GO terms are more enriched in which compartment
+    Highlights the strongest biological functions with color intensity
+    """
+    df_a = df_a[['Term', 'Combined score']].rename(columns={'Combined score': 'Compartment A'})
+    df_b = df_b[['Term', 'Combined score']].rename(columns={'Combined score': 'Compartment B'})
+    
+    df_merged = pd.merge(df_a, df_b, on="Term", how="outer").fillna(0)
+
+    df_merged['Max Score'] = df_merged[['Compartment A', 'Compartment B']].max(axis=1)
+    df_merged = df_merged.sort_values(by='Max Score', ascending=False).head(20)  
+    df_merged = df_merged.drop(columns=['Max Score']).set_index("Term")
+
+    plt.figure(figsize=(40, 12))
+    sns.heatmap(df_merged, cmap="viridis", annot=True, fmt=".2f", linewidths=0.5)
+    plt.xlabel("Compartment")
+    plt.ylabel("GO Terms")
+    plt.title("Heatmap of GO Term Enrichment in Compartments A & B")
+
+    plt.savefig("GO_results_compartments/go_term_heatmap.pdf")
+    #plt.show()
 
 if __name__ == "__main__":
 
-    csv_file = "/Users/beyzakaya/Desktop/temporal gene/mapped/enhanced_interactions_synthetic_simple.csv"
-    run_compartment_go_analysis(csv_file)
+    #csv_file = "/Users/beyzakaya/Desktop/temporal gene/mapped/enhanced_interactions_synthetic_simple.csv"
+    #run_compartment_go_analysis(csv_file)
+
+    file_path = '/Users/beyzakaya/Desktop/temporal gene/gene_ontology_analysis/GO_results_compartments/compartment_go_analysis.xlsx'
+    df_A = read_go_data(file_path, 'Compartment_A_Molecular')
+    df_B = read_go_data(file_path, 'Compartment_B_Molecular')
+    plot_go_terms(df_A, "Compartment A")
+    plot_go_terms(df_B, "Compartment B")
+    compare_compartments(df_A, df_B)
+    plot_go_heatmap(df_A, df_B)
 
