@@ -6,6 +6,7 @@ from distinct_temporal_patterns_go import clean_gene_name
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from textwrap import wrap
 
 ENRICHR_URL = "https://maayanlab.cloud/Enrichr"
 
@@ -184,6 +185,41 @@ def plot_go_heatmap(df_a, df_b):
     plt.savefig("GO_results_compartments/go_term_heatmap.pdf")
     #plt.show()
 
+def wrap_labels(labels, max_length=30):
+    wrapped_labels = []
+    for label in labels:
+        wrapped_labels.append('\n'.join(wrap(label, max_length)))
+    return wrapped_labels
+
+def plot_go_bubble(df, compartment_name):
+    """ 
+    Horizontal Bubble plot of GO terms showing Combined Score, Z-score, and p-value
+    For example, 
+    If "ABC-type xenobiotic transporter activity" is bright yellow in Compartment A 
+    but dark in B, it suggests that this function is more critical in A
+    """
+    df_sorted = df.sort_values(by='Combined score', ascending=False).head(20)
+    df_sorted['Term'] = wrap_labels(df_sorted['Term'], max_length=30)
+
+    plt.figure(figsize=(24, 12))
+    scatter = plt.scatter(
+        x=df_sorted["Z-score"], 
+        y=df_sorted["Term"], 
+        s=df_sorted["Combined score"] * 2,  # Bubble size
+        c=df_sorted["P-value"],  # Color represents p-value
+        cmap="viridis", alpha=0.8, edgecolors="black"
+    )
+
+    plt.colorbar(scatter, label="P-value")
+    plt.xlabel("Z-score (Enrichment Strength)")
+    plt.ylabel("GO Term")
+    plt.yticks(fontsize=10) 
+    plt.title(f"GO Term Enrichment Bubble Plot - {compartment_name}")
+
+    plt.savefig(f"GO_results_compartments/go_term_bubble_{compartment_name}.pdf", bbox_inches="tight")
+    plt.show()
+
+
 if __name__ == "__main__":
 
     #csv_file = "/Users/beyzakaya/Desktop/temporal gene/mapped/enhanced_interactions_synthetic_simple.csv"
@@ -192,8 +228,11 @@ if __name__ == "__main__":
     file_path = '/Users/beyzakaya/Desktop/temporal gene/gene_ontology_analysis/GO_results_compartments/compartment_go_analysis.xlsx'
     df_A = read_go_data(file_path, 'Compartment_A_Molecular')
     df_B = read_go_data(file_path, 'Compartment_B_Molecular')
-    plot_go_terms(df_A, "Compartment A")
-    plot_go_terms(df_B, "Compartment B")
-    compare_compartments(df_A, df_B)
-    plot_go_heatmap(df_A, df_B)
+    #plot_go_terms(df_A, "Compartment A")
+    #plot_go_terms(df_B, "Compartment B")
+    #compare_compartments(df_A, df_B)
+    #plot_go_heatmap(df_A, df_B)
+
+    plot_go_bubble(df_A, "Compartment_A")
+    plot_go_bubble(df_B, "Compartment_B")
 
