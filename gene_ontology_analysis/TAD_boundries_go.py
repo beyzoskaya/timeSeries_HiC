@@ -8,6 +8,8 @@ import os
 from distinct_temporal_patterns_go import clean_gene_name
 import logging
 import matplotlib.pyplot as plt
+import seaborn as sns
+import textwrap
 
 ENRICHR_URL = "https://maayanlab.cloud/Enrichr"
 logging.basicConfig(level=logging.INFO)
@@ -66,7 +68,7 @@ def identify_tad_boundary_genes(df, min_distance=5, prominence=0.1):
         
         print(f"Chromosome {chrom}: Number of valid insulation scores = {np.sum(valid_mask)}")
         
-        strong_boundaries, properties = detect_tad_boundaries(insulation_scores, valid_mask)
+        strong_boundaries, _ = detect_tad_boundaries(insulation_scores, valid_mask)
 
         for idx in strong_boundaries:
             if idx < len(chrom_df):
@@ -178,9 +180,10 @@ def run_tad_boundary_go_analysis(csv_file, min_distance=5, prominence=0.1):
 
 def plot_insulation_scores_with_boundaries(chrom_df, strong_boundaries, weak_boundaries, chromosome_name):
     plt.figure(figsize=(12, 6))
+
     plt.plot(chrom_df['Gene1_Insulation_Score'], label='Gene1 Insulation Score', color='b', alpha=0.6)
     plt.plot(chrom_df['Gene2_Insulation_Score'], label='Gene2 Insulation Score', color='g', alpha=0.6)
-
+    
     strong_indices = chrom_df[chrom_df['Gene1_clean'].isin(strong_boundaries)].index.tolist()
     weak_indices = chrom_df[chrom_df['Gene1_clean'].isin(weak_boundaries)].index.tolist()
 
@@ -190,14 +193,118 @@ def plot_insulation_scores_with_boundaries(chrom_df, strong_boundaries, weak_bou
                 color='orange', label='Weak Boundaries', zorder=5)
     
     plt.title(f"Insulation Scores and TAD Boundaries for Chromosome {chromosome_name}")
-    plt.xlabel("Gene Index") # ordering of genes 
+    plt.xlabel("Gene Index") # ordering of genes
     plt.ylabel("Insulation Score")
     plt.legend()
     plt.grid(True)
-
+    
     plt.savefig(f'GO_results_TAD/insulation_score_with_boundries_{chromosome_name}.pdf')
     plt.show()
 
+def plot_combined_insulation_scores(chrom_df, strong_boundaries, weak_boundaries, chromosome_name):
+    chrom_df["Combined_Insulation_Score"] = (chrom_df["Gene1_Insulation_Score"] + chrom_df["Gene2_Insulation_Score"]) / 2
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(chrom_df['Combined_Insulation_Score'], label='Combined Insulation Score', color='purple', alpha=0.8)
+
+    # boundaries to list for proper indexing
+    strong_boundaries = list(strong_boundaries)
+    weak_boundaries = list(weak_boundaries)
+
+    # loc[] instead of iloc to access the gene names correctly
+    plt.scatter(chrom_df.loc[chrom_df['Gene1_clean'].isin(strong_boundaries)].index, 
+                chrom_df.loc[chrom_df['Gene1_clean'].isin(strong_boundaries), 'Combined_Insulation_Score'], 
+                color='red', label='Strong Boundaries', zorder=5)
+    
+    plt.scatter(chrom_df.loc[chrom_df['Gene1_clean'].isin(weak_boundaries)].index, 
+                chrom_df.loc[chrom_df['Gene1_clean'].isin(weak_boundaries), 'Combined_Insulation_Score'], 
+                color='orange', label='Weak Boundaries', zorder=5)
+
+    plt.title(f"Combined Insulation Scores and TAD Boundaries for Chromosome {chromosome_name}")
+    plt.xlabel("Gene Index")
+    plt.ylabel("Combined Insulation Score")
+    plt.legend()
+    plt.grid(True)
+    
+    plt.savefig(f'GO_results_TAD/combined_insulation_score_with_boundries_{chromosome_name}.pdf')
+    plt.show()
+
+
+def plot_go_bubble(excel_file, sheet_name, compartment_name):
+    df = pd.read_excel(excel_file, sheet_name=sheet_name)
+    if all(col in df.columns for col in ['Term', 'Combined score', 'Z-score', 'P-value']):
+    
+        df_sorted = df.sort_values(by='Combined score', ascending=False).head(20)
+        
+        df_sorted['Term'] = wrap_labels(df_sorted['Term'], max_length=30)
+
+        plt.figure(figsize=(24, 12))
+        scatter = plt.scatter(
+            x=df_sorted["Z-score"], 
+            y=df_sorted["Term"], 
+            s=df_sorted["Combined score"] * 2,  # Bubble size
+            c=df_sorted["P-value"],  # Color represents p-value
+            cmap="viridis", alpha=0.8, edgecolors="black"
+        )
+
+        plt.colorbar(scatter, label="P-value")
+        plt.xlabel("Z-score (Enrichment Strength)")
+        plt.ylabel("GO Term")
+        plt.yticks(fontsize=10) 
+        plt.title(f"GO Term Enrichment Bubble Plot - {compartment_name}")
+
+        plt.savefig(f"GO_results_TAD/go_term_bubble_{compartment_name}.pdf", bbox_inches="tight")
+        plt.show()
+        
+    else:
+        print(f"Missing necessary columns in {sheet_name} for plotting.")
+
+def wrap_labels(labels, max_width=30):
+    return ['\n'.join(textwrap.wrap(label, max_width)) for label in labels]
+
+def compare_tad_go_results(excel_file, tad_sheet_name, top_n=10):
+    
+    tad_results_df = pd.read_excel(excel_file, sheet_name=tad_sheet_name)
+    
+    if all(col in tad_results_df.columns for col in ['Term', 'P-value']):
+        tad_results_sorted = tad_results_df.sort_values(by='P-value').head(top_n)
+    
+        tad_results_sorted['Wrapped_Term'] = wrap_labels(tad_results_sorted['Term'], max_width=30)
+
+        plt.figure(figsize=(12, 14))
+        plt.barh(tad_results_sorted['Wrapped_Term'], -np.log10(tad_results_sorted['P-value']), color='blue', alpha=0.6)
+
+        plt.xlabel("-log10(p-value)")
+        plt.ylabel("GO Terms")
+        plt.title("Top GO Terms Enriched in TAD Boundaries")
+        plt.gca().invert_yaxis()
+        plt.savefig(f'GO_results_TAD/go_results_tad_{tad_sheet_name}.png', bbox_inches='tight')
+        plt.show()
+    
+    else:
+        print(f"Missing necessary columns in {tad_sheet_name} for plotting.")
+
+def plot_tad_go_heatmap(excel_file, tad_sheet_name, top_n=10):
+    tad_results_df = pd.read_excel(excel_file, sheet_name=tad_sheet_name)
+    
+    if all(col in tad_results_df.columns for col in ['Term', 'P-value']):
+        tad_top_terms = tad_results_df.sort_values(by='P-value').head(top_n)
+
+        heatmap_data = tad_top_terms[['Term', 'P-value']].set_index('Term')
+        heatmap_data['-log10(P-value)'] = -np.log10(heatmap_data['P-value'])
+
+        heatmap_data.index = wrap_labels(heatmap_data.index, max_width=30)
+
+        plt.figure(figsize=(12, 14))
+        sns.heatmap(heatmap_data[['-log10(P-value)']], annot=True, cmap='YlGnBu', cbar_kws={'label': '-log10(p-value)'})
+        plt.title("Heatmap of GO Term Enrichment in TAD Boundaries")
+        plt.xticks(rotation=45, ha="right") 
+        plt.yticks(rotation=0)  
+        plt.savefig(f'GO_results_TAD/go_results_heatmap_tad_{tad_sheet_name}.png', bbox_inches='tight')
+        plt.show()
+    
+    else:
+        print(f"Missing necessary columns in {tad_sheet_name} for heatmap plotting.")
 
 if __name__ == "__main__":
     csv_file = "/Users/beyzakaya/Desktop/temporal gene/mapped/enhanced_interactions_synthetic_simple.csv"
@@ -206,14 +313,34 @@ if __name__ == "__main__":
     df['Gene1_clean'] = df['Gene1'].apply(clean_gene_name)
     df['Gene2_clean'] = df['Gene2'].apply(clean_gene_name)
     
-    #for chrom in df['Gene1_Chromosome'].unique():
-    #    chrom_df = df[df['Gene1_Chromosome'] == chrom]
-    #    plot_insulation_scores_with_boundaries(chrom_df, strong_boundaries, weak_boundaries, chrom)
+    strong_boundaries, weak_boundaries = identify_tad_boundary_genes(df, min_distance=5, prominence=0.1)
 
-    all_chromosomes = set(df['Gene1_Chromosome'].unique()).union(set(df['Gene2_Chromosome'].unique()))
-    for chrom in all_chromosomes:
-        chrom_df = df[(df['Gene1_Chromosome'] == chrom) | (df['Gene2_Chromosome'] == chrom)]
-        strong_boundaries, weak_boundaries = identify_tad_boundary_genes(chrom_df)
-        plot_insulation_scores_with_boundaries(chrom_df, strong_boundaries, weak_boundaries, chrom)
+    print(f"Strong Boundary Genes: {strong_boundaries}")
+    print(f"Weak Boundary Genes: {weak_boundaries}")
+    
+    #databases = ["GO_Biological_Process_2021", "GO_Molecular_Function_2021"]
+    #go_results = analyze_tad_boundaries_with_go(strong_boundaries, weak_boundaries, databases)
+
+    for chrom in df['Gene1_Chromosome'].unique():
+        chrom_df = df[df['Gene1_Chromosome'] == chrom]
+        #plot_insulation_scores_with_boundaries(chrom_df, strong_boundaries, weak_boundaries, chrom)
+    
+    for chrom in df['Gene1_Chromosome'].unique():
+        chrom_df = df[df['Gene1_Chromosome'] == chrom]
+        #plot_combined_insulation_scores(chrom_df, strong_boundaries, weak_boundaries, chrom)
+
+    excel_file = "/Users/beyzakaya/Desktop/temporal gene/gene_ontology_analysis/GO_results_TAD/TAD_boundries_go_analyzes.xlsx" 
+    sheet_name_strong_boundaries = 'Strong_Boundaries_GO_Molecul'
+    sheet_name_weak_boundaries = 'Weak_Boundaries_GO_Molecul'
+    compartment_name = "Compartment_B" # does not matter in the case of TAD boundary go analyzes/I tried to plot with different compartments 
+    #plot_go_bubble(excel_file, sheet_name_weak_boundaries, compartment_name)
+
+    compare_tad_go_results(excel_file, sheet_name_strong_boundaries, top_n=10)
+    plot_tad_go_heatmap(excel_file, sheet_name_strong_boundaries, top_n=10)
+
+    compare_tad_go_results(excel_file, sheet_name_weak_boundaries, top_n=10)
+    plot_tad_go_heatmap(excel_file, sheet_name_weak_boundaries, top_n=10)
+
+    print("TAD Boundary GO Enrichment Analysis Completed.")
    
     #run_tad_boundary_go_analysis(csv_file, min_distance=5, prominence=0.1)
