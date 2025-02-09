@@ -7,6 +7,7 @@ import json
 import os
 from distinct_temporal_patterns_go import clean_gene_name
 import logging
+import matplotlib.pyplot as plt
 
 ENRICHR_URL = "https://maayanlab.cloud/Enrichr"
 logging.basicConfig(level=logging.INFO)
@@ -134,8 +135,8 @@ def analyze_tad_boundaries_with_go(strong_boundaries, weak_boundaries, databases
                 go_results = get_enrichr_results(genes, db)
                 
                 if not go_results.empty:
-                    file_name = f"GO_results_TAD/{boundary_type}_{db}.csv"
-                    go_results.to_csv(file_name, index=False)
+                    #file_name = f"GO_results_TAD/{boundary_type}_{db}.csv"
+                    #go_results.to_csv(file_name, index=False)
                     print(f"Saved GO results for {boundary_type} - {db}")
                 
                 boundary_results[db] = go_results
@@ -175,6 +176,50 @@ def run_tad_boundary_go_analysis(csv_file, min_distance=5, prominence=0.1):
 
     print("\nTAD Boundary GO Enrichment Analysis Completed.")
 
+def plot_insulation_scores_with_boundaries(chrom_df, strong_boundaries, weak_boundaries, chromosome_name):
+    plt.figure(figsize=(12, 6))
+
+    # Plot the insulation scores for Gene1 and Gene2
+    plt.plot(chrom_df['Gene1_Insulation_Score'], label='Gene1 Insulation Score', color='b', alpha=0.6)
+    plt.plot(chrom_df['Gene2_Insulation_Score'], label='Gene2 Insulation Score', color='g', alpha=0.6)
+    
+    # Convert strong_boundaries and weak_boundaries from gene names to indices
+    strong_indices = chrom_df[chrom_df['Gene1_clean'].isin(strong_boundaries)].index.tolist()
+    weak_indices = chrom_df[chrom_df['Gene1_clean'].isin(weak_boundaries)].index.tolist()
+
+    # Scatter plot for strong and weak boundaries
+    plt.scatter(strong_indices, chrom_df.loc[strong_indices, 'Gene1_Insulation_Score'], 
+                color='red', label='Strong Boundaries', zorder=5)
+    plt.scatter(weak_indices, chrom_df.loc[weak_indices, 'Gene1_Insulation_Score'], 
+                color='orange', label='Weak Boundaries', zorder=5)
+    
+    # Plot settings
+    plt.title(f"Insulation Scores and TAD Boundaries for Chromosome {chromosome_name}")
+    plt.xlabel("Gene Index")
+    plt.ylabel("Insulation Score")
+    plt.legend()
+    plt.grid(True)
+    
+    # Save the figure
+    plt.savefig(f'GO_results_TAD/insulation_score_with_boundries_{chromosome_name}.pdf')
+    plt.show()
+
+
 if __name__ == "__main__":
     csv_file = "/Users/beyzakaya/Desktop/temporal gene/mapped/enhanced_interactions_synthetic_simple.csv"
-    run_tad_boundary_go_analysis(csv_file, min_distance=5, prominence=0.1)
+
+    df = pd.read_csv(csv_file)
+    df['Gene1_clean'] = df['Gene1'].apply(clean_gene_name)
+    df['Gene2_clean'] = df['Gene2'].apply(clean_gene_name)
+    
+    #for chrom in df['Gene1_Chromosome'].unique():
+    #    chrom_df = df[df['Gene1_Chromosome'] == chrom]
+    #    plot_insulation_scores_with_boundaries(chrom_df, strong_boundaries, weak_boundaries, chrom)
+
+    all_chromosomes = set(df['Gene1_Chromosome'].unique()).union(set(df['Gene2_Chromosome'].unique()))
+    for chrom in all_chromosomes:
+        chrom_df = df[(df['Gene1_Chromosome'] == chrom) | (df['Gene2_Chromosome'] == chrom)]
+        strong_boundaries, weak_boundaries = identify_tad_boundary_genes(chrom_df)
+        plot_insulation_scores_with_boundaries(chrom_df, strong_boundaries, weak_boundaries, chrom)
+   
+    #run_tad_boundary_go_analysis(csv_file, min_distance=5, prominence=0.1)
