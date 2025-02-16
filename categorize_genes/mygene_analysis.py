@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 import mygene
 import numpy as np
 import networkx as nx
+import matplotlib.patches as patches
+import textwrap
 
 def query_gene_info(genes):
 
@@ -175,7 +177,8 @@ def categorize_genes_functionally(gene_list):
     'Transcription & Gene Expression': [
         'transcription', 'RNA polymerase', 'gene expression',
         'transcriptional regulation', 'TP53', 'GATA', 'TTF-1',
-        'transcription factor', 'FOXF2', 'P63', 'nuclear factor'
+        'transcription factor', 'FOXF2', 'P63', 'nuclear factor', 
+        'replication'
     ],
     'Cancer & Disease Related': [
         'cancer', 'gastric cancer', 'leukemia', 'papillomavirus',
@@ -297,7 +300,7 @@ def visualize_functional_categories(categorized_genes):
     plt.tight_layout()
     plt.show()
     
-    # 2. Network visualization of categories
+    # 2. Network visualization of categories with more distance
     plt.figure(figsize=(15, 15))
     G = nx.Graph()
     
@@ -308,23 +311,24 @@ def visualize_functional_categories(categorized_genes):
             G.add_node(gene, node_type='gene')
             G.add_edge(category, gene)
     
-    pos = nx.spring_layout(G)
+    # Adjust the spring layout for better spacing
+    pos = nx.spring_layout(G, k=1.5, seed=42)  # Increased k for more spacing
     
     nx.draw_networkx_nodes(G, pos, 
                           nodelist=[n for n, d in G.nodes(data=True) if d['node_type']=='category'],
                           node_color='lightblue',
-                          node_size=2000)
+                          node_size=2500)
     
     nx.draw_networkx_nodes(G, pos,
                           nodelist=[n for n, d in G.nodes(data=True) if d['node_type']=='gene'],
                           node_color='lightgreen',
-                          node_size=1000)
+                          node_size=1200)
     
-    nx.draw_networkx_edges(G, pos, alpha=0.2)
+    nx.draw_networkx_edges(G, pos, alpha=0.3, width=0.8)
     
-    nx.draw_networkx_labels(G, pos)
+    nx.draw_networkx_labels(G, pos, font_size=10)
     
-    plt.title('Gene Functional Category Network')
+    plt.title('Gene Functional Category Network (Spaced Out)')
     plt.axis('off')
     plt.show()
 
@@ -388,7 +392,69 @@ def plot_go_analysis(go_df):
     sns.heatmap(pivot_table, annot=True, cmap='YlOrRd')
     plt.title('Gene Annotation Distribution')
     plt.show()
+
+def plot_clustered_gene_bubbles(categorized_genes):
+    plt.figure(figsize=(12, 8))
     
+    category_sizes = {cat: len(genes) for cat, genes in categorized_genes.items() if genes}
+    
+    x_positions = np.arange(len(category_sizes))
+    sizes = np.array(list(category_sizes.values())) * 100  # Scale bubble size
+    colors = sns.color_palette("husl", len(category_sizes))  # Unique colors
+
+    for i, (category, size) in enumerate(category_sizes.items()):
+        plt.scatter(x_positions[i], size, s=sizes[i], color=colors[i], alpha=0.6, label=category, edgecolors="black")
+
+        gene_names = ", ".join(categorized_genes[category][:5])  
+        plt.text(x_positions[i], size, gene_names, fontsize=9, ha='center', va='bottom', rotation=30)
+
+    plt.xticks(x_positions, category_sizes.keys(), rotation=45, ha="right")
+    plt.ylabel("Number of Genes")
+    plt.title("Clustered Gene Categories - Bubble Plot")
+    plt.legend(loc='upper right', fontsize=8, title="Categories")
+    plt.tight_layout()
+    plt.savefig('mygene_functional_categorization/functional_bubble_categories.png')
+    plt.show()
+
+def plot_separate_networks(categorized_genes):
+    num_categories = len(categorized_genes)
+
+    cols = min(3, num_categories)  # Max 3 columns per row
+    rows = -(-num_categories // cols) 
+
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 5))  # Dynamic sizing
+    axes = axes.flatten() if num_categories > 1 else [axes]  
+
+    for i, (category, genes) in enumerate(categorized_genes.items()):
+        ax = axes[i]
+        
+        G = nx.Graph()
+        G.add_node(category, node_type='category')
+        for gene in genes:
+            G.add_node(gene, node_type='gene')
+            G.add_edge(category, gene)
+
+        pos = nx.spring_layout(G, seed=42, k=0.5)  
+
+        nx.draw_networkx_nodes(G, pos, ax=ax, 
+                               nodelist=[category], node_color='lightblue', node_size=1500)
+        nx.draw_networkx_nodes(G, pos, ax=ax, 
+                               nodelist=genes, node_color='lightgreen', node_size=800)
+        nx.draw_networkx_edges(G, pos, ax=ax, width=0.8, alpha=0.5)
+
+        nx.draw_networkx_labels(G, pos, ax=ax, font_size=8)
+
+        ax.set_title(category, fontsize=10, fontweight='bold', pad=10) 
+
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_frame_on(False)
+
+    plt.subplots_adjust(top=0.9, hspace=0.6, wspace=0.4)
+    plt.savefig('mygene_functional_categorization/functional_categories_all_genes.png')
+    plt.show()
+
+
 if __name__ == "__main__":
     gene_list = [
      "Hist1h1b", "VIM", "P-63", "INMT", "ADAMTSL2", "Tnc", "FGF18", "Shisa3", "integrin subunit alpha 8", "H2ac4", 
@@ -425,15 +491,12 @@ if __name__ == "__main__":
     updated_gene_list = update_gene_list_with_alternatives(gene_list, alternative_names)
 
     categorized_genes = categorize_genes_functionally(updated_gene_list)
-    visualize_pathway_based_categories(categorized_genes)
-    visualize_functional_categories(categorized_genes)
-    plot_gene_category_heatmap(categorized_genes)
+    #visualize_pathway_based_categories(categorized_genes)
+    #visualize_functional_categories(categorized_genes)
+    #plot_gene_category_heatmap(categorized_genes)
 
-    gene_categories_df = analyze_functional_distribution(categorized_genes)
-
-    go_info_df = query_gene_info(updated_gene_list)
-    go_terms_df = process_go_terms(go_info_df)
-    plot_go_analysis(go_terms_df)
+    #plot_clustered_gene_bubbles(categorized_genes)
+    plot_separate_networks(categorized_genes)
     
     #print("Getting comprehensive functional categories...")
     #categories, unmapped_genes = get_comprehensive_categories(gene_list)

@@ -9,9 +9,11 @@ expression_columns = [col for col in df.columns if 'Time' in col]
 
 unique_genes = pd.concat([df['Gene1'], df['Gene2']]).unique()
 unique_genes = [str(gene).upper() for gene in unique_genes]
+unique_genes = [gene.replace('INTEGRIN SUBUNIT ALPHA 8', 'INTEGRIN SUBUNIT') for gene in unique_genes]
 
 expression_matrix = pd.DataFrame(index=unique_genes)
 
+# Each time column corresponds to the gene expression at different time points
 for time_col in expression_columns:
     gene1_values = df.set_index('Gene1')[time_col]
     gene2_values = df.set_index('Gene2')[time_col]
@@ -39,11 +41,12 @@ gene_list = [
 gene_list = [gene.upper() for gene in gene_list]
 
 try:
+    # Gene set enrichment analysis
     gsea = gp.gsea(
         data=expression_matrix[early_time_points + late_time_points],
         gene_sets={'my_gene_set': gene_list},
         cls=cls,
-        method='signal_to_noise',
+        method='t_test', # rank for this method
         permutation_type='phenotype',
         number_of_permutations=1000,
         verbose=True
@@ -71,6 +74,8 @@ try:
     plt.title('GSEA Metrics')
     
     plt.subplot(2, 1, 2)
+    # leading edge genes refer to the subset of genes that are most responsible for the enrichment
+    # leading genes are usually the ones that show the most significant association with the phenotype or condition
     leading_genes = gsea_results.loc[0, 'Lead_genes'].split(';')
     leading_gene_values = pd.DataFrame({
         'Gene': leading_genes,
@@ -156,6 +161,9 @@ def create_additional_gsea_visualizations(gsea, expression_matrix, early_time_po
     plt.savefig('early_late_distribution.png')
     
     # 3. Correlation Heatmap
+    # high positive correlation means that the gene expressions of these two genes are highly similar. These genes show similar expression patterns across time points
+    # This could indicate that these genes are co-regulated or part of the same biological pathway or process. 
+    # correlation closer to -1 indicates an inverse relationship. That is, when the expression of one gene goes up, the expression of the other gene goes down, and vice versa.
     plt.figure(figsize=(10, 8))
     gene_correlations = expression_matrix.loc[leading_genes, all_timepoints].T.corr()
     sns.heatmap(gene_correlations, 
