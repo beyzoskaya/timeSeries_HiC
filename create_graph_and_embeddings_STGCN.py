@@ -19,7 +19,7 @@ sys.path.append('./STGCN')
 from STGCN.model.models import STGCNChebGraphConv
 import argparse
 from scipy.spatial.distance import cdist
-from ontology_analysis import analyze_expression_levels_research, analyze_expression_levels_kmeans
+from clustering_by_expr_levels import analyze_expression_levels_research, analyze_expression_levels_kmeans
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -48,8 +48,10 @@ class TemporalGraphDataset:
         self.embedding_dim = embedding_dim
         
         self.df = pd.read_csv(csv_file)
-        self.df['Gene1_clean'] = self.df['Gene1'].apply(clean_gene_name)
-        self.df['Gene2_clean'] = self.df['Gene2'].apply(clean_gene_name)
+        print(f"Before cleaning the gene names Gene1: {self.df['Gene1']}")
+        print(f"Before cleaning the gene names Gene2: {self.df['Gene2']}")
+        #self.df['Gene1_clean'] = self.df['Gene1'].apply(clean_gene_name)
+        #self.df['Gene2_clean'] = self.df['Gene2'].apply(clean_gene_name)
 
         #genes_to_remove = {'THTPA', 'AMACR', 'MMP7', 'ABCG2', 'HPGDS', 'VIM'}
         # Filter out genes which gave negative correlation to see performance of other genes 
@@ -57,6 +59,13 @@ class TemporalGraphDataset:
         #self.df = self.df[~self.df['Gene2_clean'].isin(genes_to_remove)]
         
         # Create static node mapping
+
+        """
+        I added this to not change proper parts for cleaning gene name because in miRNA data, all genes are in cleaned format
+        """
+        self.df['Gene1_clean'] = self.df['Gene1']
+        self.df['Gene2_clean'] = self.df['Gene2']
+
         unique_genes = pd.concat([self.df['Gene1_clean'], self.df['Gene2_clean']]).unique()
         self.node_map = {gene: idx for idx, gene in enumerate(unique_genes)}
         self.num_nodes = len(self.node_map)
@@ -64,8 +73,10 @@ class TemporalGraphDataset:
         
         # Get time points
         self.time_cols = [col for col in self.df.columns if 'Time_' in col]
-        self.time_points = sorted(list(set([float(col.split('_')[-1]) 
+        # This is for mRNA data because column names for time points are different
+        self.time_points = sorted(list(set([float(col.split('_')[-1])  
                                           for col in self.time_cols if 'Gene1' in col])))
+    
         print(f"Found {len(self.time_points)} time points")
         
         # Create base graph and features
@@ -126,7 +137,7 @@ class TemporalGraphDataset:
         global_min = min(all_expressions)
         global_max = max(all_expressions)
         print(f"Global expression range: [{global_min:.4f}, {global_max:.4f}]")
-        
+
         for t in self.time_points:
             print(f"\nProcessing time point {t}")
             
@@ -136,7 +147,7 @@ class TemporalGraphDataset:
                 gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
                 expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
                             (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
-                # min-max global normalization
+                # min-max global normalization for mRNA
                 expression_values[gene] = (expr_value - global_min) / (global_max - global_min)
             
             # Create graph using normalized expression values
@@ -228,12 +239,12 @@ class TemporalGraphDataset:
         temporal_edge_indices = {}
         temporal_edge_attrs = {}
 
-        clusters, _ = analyze_expression_levels_research(self)
-        #clusters, _ = analyze_expression_levels_kmeans(self)
-        gene_clusters = {}
-        for cluster_name, genes in clusters.items():
-            for gene in genes:
-                gene_clusters[gene] = cluster_name
+        #clusters, _ = analyze_expression_levels_research(self)
+        # clusters, _ = analyze_expression_levels_kmeans_miRNA(self)
+        # gene_clusters = {}
+        # for cluster_name, genes in clusters.items():
+        #     for gene in genes:
+        #         gene_clusters[gene] = cluster_name
         
         # normalize all expression values across all time points
         print("\nNormalizing expression values across all time points...")
@@ -257,6 +268,7 @@ class TemporalGraphDataset:
 
         for t in self.time_points:
             print(f"\nProcessing time point {t}")
+            print(f"All time points: {self.time_points}")
             
             expression_values = {}
             for gene in self.node_map.keys():
@@ -264,8 +276,23 @@ class TemporalGraphDataset:
                 gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
                 expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
                             (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
-                expression_values[gene] = (expr_value - global_min) / (global_max - global_min)
-            
+                
+                # Handle and check for NaN expression values
+                if np.isnan(expr_value).any():
+                    print(f"NaN detected in {gene} expression value at time {t}. Fixing...")
+                    expr_value = np.nan_to_num(expr_value, nan=0.0)  
+
+                # Time point 154.0 have NaN values in it! #FIXME: Why there are nan values specifically this time point?
+                if 154.0 in expression_values and np.isnan(expression_values[154.0]).any():
+                    print("Skipping Time Point 154.0 due to NaNs.")
+                    continue  # Skip this time point
+
+                # min-max normalization for mRNA
+                expression_values[gene] = (expr_value - global_min) / (global_max - global_min + 1e-8)
+
+                # log normalization for miRNA
+                # expression_values[gene] = np.log1p(expr_value) 
+
             # Create graph using normalized expression values and cluster information
             G = nx.Graph()
             G.add_nodes_from(self.node_map.keys())
@@ -284,6 +311,9 @@ class TemporalGraphDataset:
                     hic_weight = np.log1p(row['HiC_Interaction'])  # Log transform for the low correlated genes
                 else:
                     hic_weight = row['HiC_Interaction'] 
+                
+                if pd.isna(row['HiC_Interaction']):
+                    print(f"HiC weight is NaN")
             
                 compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0 
 
@@ -292,7 +322,7 @@ class TemporalGraphDataset:
                 ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
                 
                 # cluster similarity component
-                cluster_sim = 1.2 if gene_clusters[gene1] == gene_clusters[gene2] else 1.0
+                #cluster_sim = 1.2 if gene_clusters[gene1] == gene_clusters[gene2] else 1.0
 
                 # Artificially increase connection strength for negative correlated genes
                 if gene1 in ["AMACR", "ABCG2", "HPGDS"] or gene2 in ["AMACR", "ABCG2", "HPGDS"]:
@@ -306,7 +336,7 @@ class TemporalGraphDataset:
                             compartment_sim * 0.1 +
                             tad_sim * 0.1 +
                             ins_sim * 0.1 +
-                            expr_sim * 0.4) * cluster_sim
+                            expr_sim * 0.4) # I remove cluster sim from here for miRNA
                 
                 G.add_edge(gene1, gene2, weight=weight)
                 i, j = self.node_map[gene1], self.node_map[gene2]
@@ -338,6 +368,12 @@ class TemporalGraphDataset:
             for gene in self.node_map.keys():
                 # Get Node2Vec embedding
                 node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
+
+                node_embedding_print = model.wv[gene]
+                print(f"Node embedding for {gene}: {node_embedding_print}")
+                if np.any(np.isnan(node_embedding_print)):
+                    print(f"NaN in embedding for {gene}")
+
 
                 print(f"\n{gene} embedding analysis:")
                 print(f"Original last dimension value: {node_embedding[-1]:.4f}")
