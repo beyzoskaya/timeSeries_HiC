@@ -441,6 +441,8 @@ class TemporalGraphDataset:
         if debug_mode: print("\nApplying log transformation and normalizing expression values...")
 
         all_expressions = []
+        all_raw_expressions = []
+
         for t in self.time_points:
             for gene in self.node_map.keys():
                 gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
@@ -450,9 +452,11 @@ class TemporalGraphDataset:
                 
                 log_expr = np.log2(expr_value + 1)  # Log transformation
                 all_expressions.append(log_expr)
+                all_raw_expressions.append(expr_value)
 
-                if debug_mode and gene in ["GeneA", "GeneB"]: 
-                    print(f"Time {t}, Gene {gene}: Raw={expr_value:.2f}, Log2+1={log_expr:.2f}")
+                if debug_mode:
+                    print(f"Raw expression values range: [{min(all_raw_expressions)}, {max(all_raw_expressions)}]")
+                    print(f"Number of zero expressions: {sum(1 for x in all_raw_expressions if x == 0)}")
 
         # Compute min/max on log-transformed values
         global_min = min(all_expressions)
@@ -492,27 +496,41 @@ class TemporalGraphDataset:
                 tad_sim = 1 / (1 + abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance']))
                 ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
 
+                if debug_mode:
+                    print(f"\nEdge between {gene1} and {gene2}:")
+                    print(f"  Expression similarity: {expr_sim:.4f}")
+                    print(f"  HiC weight: {hic_weight:.4f}")
+                    print(f"  Compartment similarity: {compartment_sim}")
+                    print(f"  TAD similarity: {tad_sim:.4f}")
+                    print(f"  Insulation score similarity: {ins_sim:.4f}")
+
                 weight = (hic_weight * 0.3 +
                         compartment_sim * 0.1 +
                         tad_sim * 0.1 +
                         ins_sim * 0.1 +
                         expr_sim * 0.4)
+                
+                if debug_mode:
+                    print(f"  Final edge weight: {weight:.4f}")
+                    print(f"  Node indices: {self.node_map[gene1]} -> {self.node_map[gene2]}")
 
                 G.add_edge(gene1, gene2, weight=weight)
                 i, j = self.node_map[gene1], self.node_map[gene2]
                 edge_index.extend([[i, j], [j, i]])
                 edge_weights.extend([weight, weight])
-
-                if debug_mode and gene1 in ["GeneA", "GeneB"] and gene2 in ["GeneA", "GeneB"]:
-                    print(f"Edge ({gene1}, {gene2}): ExprSim={expr_sim:.4f}, TotalWeight={weight:.4f}")
-
+            
+            if debug_mode:
+                print(f"\nEdge Statistics for time {t}:")
+                print(f"Total number of edges: {len(edge_weights)//2}") 
+                print(f"Weight range: [{min(edge_weights):.4f}, {max(edge_weights):.4f}]")
+                print(f"Average weight: {np.mean(edge_weights):.4f}")
 
             if debug_mode: print(f"\nRunning Node2Vec for time {t}...")
             node2vec = Node2Vec(
                 G, 
                 dimensions=self.embedding_dim, 
                 walk_length=50, 
-                num_walks=25, 
+                num_walks=10, 
                 p=1.0, 
                 q=1.0, 
                 workers=1, 
@@ -521,18 +539,25 @@ class TemporalGraphDataset:
             model = node2vec.fit(window=10, min_count=1, batch_words=4)
 
             features = []
+            embedding_values = []
             for gene in self.node_map.keys():
                 node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
-                
-                scale_factor = 1 / (node_embedding.abs().mean().item())
-                if scale_factor < 1e-4:
-                    scale_factor = 1.0  
-                
-                node_embedding[-1] = expression_values[gene] * scale_factor 
-                features.append(node_embedding)
+                embedding_values.append(node_embedding)
+            embedding_values = torch.stack(embedding_values)
 
-                if debug_mode and gene in ["GeneA", "GeneB"]:  
-                    print(f"Embedding for {gene}: {node_embedding[:5]} ... {node_embedding[-1]:.4f}")
+            # Min-Max Normalize Embeddings to match expression range [0,1]
+            embedding_min = embedding_values.min()
+            embedding_max = embedding_values.max()
+
+            embedding_values = (embedding_values - embedding_min) / (embedding_max - embedding_min + 1e-8) 
+          
+            if debug_mode and gene in ["GeneA", "GeneB"]:  
+                print(f"Embedding for {gene}: {node_embedding[:5]} ... {node_embedding[-1]:.4f}")
+            
+            for i, gene in enumerate(self.node_map.keys()):
+                node_embedding = embedding_values[i]
+                node_embedding[-1] = expression_values[gene]  # Embed normalized expression
+                features.append(node_embedding)
 
             temporal_features[t] = torch.stack(features)
             temporal_edge_indices[t] = torch.tensor(edge_index).t().contiguous()
@@ -545,8 +570,6 @@ class TemporalGraphDataset:
                 print("-" * 50)
 
         return temporal_features, temporal_edge_indices, temporal_edge_attrs
-
-
 
     def create_temporal_node_features_several_graphs_created_clustering_closeness_betweenness(self):
         temporal_features = {}
