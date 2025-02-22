@@ -78,13 +78,18 @@ class TemporalGraphDataset:
                                           for col in self.time_cols if 'Gene1' in col])))
     
         print(f"Found {len(self.time_points)} time points")
+
+        if 154.0 in self.time_points:
+            self.time_points.remove(154.0)
+
+        print(f"Found {len(self.time_points)} time points after removing 154.0")
         
         # Create base graph and features
         self.base_graph = self.create_base_graph()
         print("Base graph created")
         #self.node_features = self.create_temporal_node_features_several_graphs_created_clustering() # try with several graphs for time series consistency
         self.node_features, self.temporal_edge_indices, self.temporal_edge_attrs = \
-        self.create_temporal_node_features_several_graphs_created_clustering()
+        self.create_temporal_node_features_several_graphs_created_clustering_mirna(debug_mode=True)
         print("Temporal node features created")
         
         # Get edge information
@@ -239,12 +244,12 @@ class TemporalGraphDataset:
         temporal_edge_indices = {}
         temporal_edge_attrs = {}
 
-        #clusters, _ = analyze_expression_levels_research(self)
-        # clusters, _ = analyze_expression_levels_kmeans_miRNA(self)
-        # gene_clusters = {}
-        # for cluster_name, genes in clusters.items():
-        #     for gene in genes:
-        #         gene_clusters[gene] = cluster_name
+        clusters, _ = analyze_expression_levels_research(self)
+        #clusters, _ = analyze_expression_levels_kmeans(self)
+        gene_clusters = {}
+        for cluster_name, genes in clusters.items():
+            for gene in genes:
+                gene_clusters[gene] = cluster_name
         
         # normalize all expression values across all time points
         print("\nNormalizing expression values across all time points...")
@@ -264,34 +269,32 @@ class TemporalGraphDataset:
         global_max = max(all_expressions)
         print(f"Global expression range: [{global_min:.4f}, {global_max:.4f}]")
 
+        if global_max == global_min:
+            print("Warning: Global expression range has zero range, which may cause division by zero.")
+
         low_corr_genes = ['AMACR', 'ABCG2', 'MMP7', 'HPGDS', 'MGAT4A']
 
         for t in self.time_points:
             print(f"\nProcessing time point {t}")
-            print(f"All time points: {self.time_points}")
+            #print(f"All time points: {self.time_points}")
             
             expression_values = {}
             for gene in self.node_map.keys():
                 gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
                 gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                
+                # Added for debugging of miRNA data
+                if np.isnan(gene1_expr).any():
+                    print(f"NaN detected in Gene1 expression for {gene} at time {t}")
+                if np.isnan(gene2_expr).any():
+                    print(f"NaN detected in Gene2 expression for {gene} at time {t}")
+
                 expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
                             (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
-                
-                # Handle and check for NaN expression values
-                if np.isnan(expr_value).any():
-                    print(f"NaN detected in {gene} expression value at time {t}. Fixing...")
-                    expr_value = np.nan_to_num(expr_value, nan=0.0)  
-
-                # Time point 154.0 have NaN values in it! #FIXME: Why there are nan values specifically this time point?
-                if 154.0 in expression_values and np.isnan(expression_values[154.0]).any():
-                    print("Skipping Time Point 154.0 due to NaNs.")
-                    continue  # Skip this time point
 
                 # min-max normalization for mRNA
                 expression_values[gene] = (expr_value - global_min) / (global_max - global_min + 1e-8)
 
-                # log normalization for miRNA
-                # expression_values[gene] = np.log1p(expr_value) 
 
             # Create graph using normalized expression values and cluster information
             G = nx.Graph()
@@ -307,6 +310,11 @@ class TemporalGraphDataset:
                 
                 # Calculate edge weight components
                 expr_sim = 1 / (1 + abs(expression_values[gene1] - expression_values[gene2]))
+
+                # Added for debugging of miRNA data
+                if np.isnan(expr_sim):
+                    print(f"NaN detected in expression similarity between {gene1} and {gene2} at time {t}")
+
                 if gene1 in low_corr_genes or gene2 in low_corr_genes:
                     hic_weight = np.log1p(row['HiC_Interaction'])  # Log transform for the low correlated genes
                 else:
@@ -320,9 +328,19 @@ class TemporalGraphDataset:
                 tad_dist = abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance'])
                 tad_sim = 1 / (1 + tad_dist)
                 ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
+
+                # Added for debugging of miRNA data
+                if np.isnan(hic_weight):
+                    print(f"NaN detected in HiC weight for {gene1}-{gene2}")
+                if np.isnan(compartment_sim):
+                    print(f"NaN detected in compartment similarity for {gene1}-{gene2}")
+                if np.isnan(tad_sim):
+                    print(f"NaN detected in TAD similarity for {gene1}-{gene2}")
+                if np.isnan(ins_sim):
+                    print(f"NaN detected in insulation similarity for {gene1}-{gene2}")
                 
                 # cluster similarity component
-                #cluster_sim = 1.2 if gene_clusters[gene1] == gene_clusters[gene2] else 1.0
+                cluster_sim = 1.2 if gene_clusters[gene1] == gene_clusters[gene2] else 1.0
 
                 # Artificially increase connection strength for negative correlated genes
                 if gene1 in ["AMACR", "ABCG2", "HPGDS"] or gene2 in ["AMACR", "ABCG2", "HPGDS"]:
@@ -336,7 +354,7 @@ class TemporalGraphDataset:
                             compartment_sim * 0.1 +
                             tad_sim * 0.1 +
                             ins_sim * 0.1 +
-                            expr_sim * 0.4) # I remove cluster sim from here for miRNA
+                            expr_sim * 0.4) * cluster_sim
                 
                 G.add_edge(gene1, gene2, weight=weight)
                 i, j = self.node_map[gene1], self.node_map[gene2]
@@ -362,18 +380,12 @@ class TemporalGraphDataset:
                 min_count=1,
                 batch_words=4
             )
-            
+
             # Create feature vectors
             features = []
             for gene in self.node_map.keys():
                 # Get Node2Vec embedding
                 node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
-
-                node_embedding_print = model.wv[gene]
-                print(f"Node embedding for {gene}: {node_embedding_print}")
-                if np.any(np.isnan(node_embedding_print)):
-                    print(f"NaN in embedding for {gene}")
-
 
                 print(f"\n{gene} embedding analysis:")
                 print(f"Original last dimension value: {node_embedding[-1]:.4f}")
@@ -387,15 +399,15 @@ class TemporalGraphDataset:
                 print(f"Expression value to be inserted: {expression_values[gene]:.4f}")
                 orig_last_dim = node_embedding[-1].item()
                 
-                # Last dimension is the normalized expression value
+                # Last dimension is the normalized expression value for mRNA data because there are very low valued expressions
                 if gene in ["AMACR", "ABCG2", "HPGDS"]: 
-                   node_embedding[-1] = expression_values[gene] * 2.0 #scale negative correlated genes more higher value
-                   #print(f"Expression value of embedding from negative corel {gene}: {node_embedding[-1]}")
+                    node_embedding[-1] = expression_values[gene] * 2.0 #scale negative correlated genes more higher value
+                    print(f"Expression value of embedding from negative corel {gene}: {node_embedding[-1]}")
                 else:
                     print(f"Node embeddings last dim before adding expression value: {node_embedding[-1]}")
                     node_embedding[-1] = expression_values[gene]
                     print(f"Node embeddings last dim after adding expression value: {node_embedding[-1]}")
-                    #print(f"Expression value for {gene}: {node_embedding[-1]}")
+                    print(f"Expression value for {gene}: {node_embedding[-1]}")
                 
                 print(f"Statistics before override:")
                 print(f"  Mean: {orig_mean:.4f}")
@@ -418,6 +430,123 @@ class TemporalGraphDataset:
             print(f"Embedding range: [{temporal_features[t].min():.4f}, {temporal_features[t].max():.4f}]")
             
         return temporal_features, temporal_edge_indices, temporal_edge_attrs
+    
+
+    def create_temporal_node_features_several_graphs_created_clustering_mirna(self, debug_mode=True):
+        temporal_features = {}
+        temporal_edge_indices = {}
+        temporal_edge_attrs = {}
+
+        # Normalize all expression values across all time points
+        if debug_mode: print("\nApplying log transformation and normalizing expression values...")
+
+        all_expressions = []
+        for t in self.time_points:
+            for gene in self.node_map.keys():
+                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                
+                log_expr = np.log2(expr_value + 1)  # Log transformation
+                all_expressions.append(log_expr)
+
+                if debug_mode and gene in ["GeneA", "GeneB"]: 
+                    print(f"Time {t}, Gene {gene}: Raw={expr_value:.2f}, Log2+1={log_expr:.2f}")
+
+        # Compute min/max on log-transformed values
+        global_min = min(all_expressions)
+        global_max = max(all_expressions)
+        if debug_mode: print(f"Global expression range after log transformation: [{global_min:.4f}, {global_max:.4f}]")
+
+        for t in self.time_points:
+            if debug_mode: print(f"\nProcessing time point {t}...")
+
+            expression_values = {}
+            for gene in self.node_map.keys():
+                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+
+                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                
+                log_expr = np.log2(expr_value + 1)  # Log transformation
+                normalized_expr = (log_expr - global_min) / (global_max - global_min + 1e-8)  # Min-max scaling
+                
+                expression_values[gene] = normalized_expr
+
+                if debug_mode and gene in ["GeneA", "GeneB"]: 
+                    print(f"Time {t}, Gene {gene}: Log2+1={log_expr:.2f}, Normalized={normalized_expr:.4f}")
+
+            G = nx.Graph()
+            G.add_nodes_from(self.node_map.keys())
+
+            edge_index = []
+            edge_weights = []
+            for _, row in self.df.iterrows():
+                gene1, gene2 = row['Gene1_clean'], row['Gene2_clean']
+                
+                expr_sim = 1 / (1 + abs(expression_values[gene1] - expression_values[gene2]))
+                hic_weight = row['HiC_Interaction']
+                compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0 
+                tad_sim = 1 / (1 + abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance']))
+                ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
+
+                weight = (hic_weight * 0.3 +
+                        compartment_sim * 0.1 +
+                        tad_sim * 0.1 +
+                        ins_sim * 0.1 +
+                        expr_sim * 0.4)
+
+                G.add_edge(gene1, gene2, weight=weight)
+                i, j = self.node_map[gene1], self.node_map[gene2]
+                edge_index.extend([[i, j], [j, i]])
+                edge_weights.extend([weight, weight])
+
+                if debug_mode and gene1 in ["GeneA", "GeneB"] and gene2 in ["GeneA", "GeneB"]:
+                    print(f"Edge ({gene1}, {gene2}): ExprSim={expr_sim:.4f}, TotalWeight={weight:.4f}")
+
+
+            if debug_mode: print(f"\nRunning Node2Vec for time {t}...")
+            node2vec = Node2Vec(
+                G, 
+                dimensions=self.embedding_dim, 
+                walk_length=50, 
+                num_walks=25, 
+                p=1.0, 
+                q=1.0, 
+                workers=1, 
+                seed=42
+            )
+            model = node2vec.fit(window=10, min_count=1, batch_words=4)
+
+            features = []
+            for gene in self.node_map.keys():
+                node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
+                
+                scale_factor = 1 / (node_embedding.abs().mean().item())
+                if scale_factor < 1e-4:
+                    scale_factor = 1.0  
+                
+                node_embedding[-1] = expression_values[gene] * scale_factor 
+                features.append(node_embedding)
+
+                if debug_mode and gene in ["GeneA", "GeneB"]:  
+                    print(f"Embedding for {gene}: {node_embedding[:5]} ... {node_embedding[-1]:.4f}")
+
+            temporal_features[t] = torch.stack(features)
+            temporal_edge_indices[t] = torch.tensor(edge_index).t().contiguous()
+            temporal_edge_attrs[t] = torch.tensor(edge_weights, dtype=torch.float32).unsqueeze(1)
+
+            if debug_mode:
+                print(f"\nFeature Statistics for time {t}:")
+                print(f"Expression range after log normalization: [{min(expression_values.values()):.4f}, {max(expression_values.values()):.4f}]")
+                print(f"Embedding range: [{temporal_features[t].min():.4f}, {temporal_features[t].max():.4f}]")
+                print("-" * 50)
+
+        return temporal_features, temporal_edge_indices, temporal_edge_attrs
+
+
 
     def create_temporal_node_features_several_graphs_created_clustering_closeness_betweenness(self):
         temporal_features = {}
