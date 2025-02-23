@@ -20,6 +20,9 @@ from STGCN.model.models import STGCNChebGraphConv
 import argparse
 from scipy.spatial.distance import cdist
 from clustering_by_expr_levels import analyze_expression_levels_research, analyze_expression_levels_kmeans
+from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import QuantileTransformer
+from networkx.algorithms.components import is_connected
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -78,18 +81,13 @@ class TemporalGraphDataset:
                                           for col in self.time_cols if 'Gene1' in col])))
     
         print(f"Found {len(self.time_points)} time points")
-
-        if 154.0 in self.time_points:
-            self.time_points.remove(154.0)
-
-        print(f"Found {len(self.time_points)} time points after removing 154.0")
         
         # Create base graph and features
         self.base_graph = self.create_base_graph()
         print("Base graph created")
         #self.node_features = self.create_temporal_node_features_several_graphs_created_clustering() # try with several graphs for time series consistency
         self.node_features, self.temporal_edge_indices, self.temporal_edge_attrs = \
-        self.create_temporal_node_features_several_graphs_created_clustering_mirna(debug_mode=True)
+        self.create_temporal_node_features_several_graphs_mirna_developed(debug_mode=True)
         print("Temporal node features created")
         
         # Get edge information
@@ -432,11 +430,12 @@ class TemporalGraphDataset:
         return temporal_features, temporal_edge_indices, temporal_edge_attrs
     
 
-    def create_temporal_node_features_several_graphs_created_clustering_mirna(self, debug_mode=True):
+    def create_temporal_node_features_several_graphs_created_mirna(self, debug_mode=True):
         temporal_features = {}
         temporal_edge_indices = {}
         temporal_edge_attrs = {}
 
+        scaler = RobustScaler()
         # Normalize all expression values across all time points
         if debug_mode: print("\nApplying log transformation and normalizing expression values...")
 
@@ -450,13 +449,13 @@ class TemporalGraphDataset:
                 expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
                             (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
                 
-                log_expr = np.log2(expr_value + 1)  # Log transformation
-                all_expressions.append(log_expr)
+                #log_expr = np.log2(expr_value + 1)  # Log transformation
+                #all_expressions.append(log_expr)
                 all_raw_expressions.append(expr_value)
 
-                if debug_mode:
-                    print(f"Raw expression values range: [{min(all_raw_expressions)}, {max(all_raw_expressions)}]")
-                    print(f"Number of zero expressions: {sum(1 for x in all_raw_expressions if x == 0)}")
+                #if debug_mode:
+                    #print(f"Raw expression values range: [{min(all_raw_expressions)}, {max(all_raw_expressions)}]")
+                    #print(f"Number of zero expressions: {sum(1 for x in all_raw_expressions if x == 0)}")
 
         # Compute min/max on log-transformed values
         global_min = min(all_expressions)
@@ -476,11 +475,12 @@ class TemporalGraphDataset:
                 
                 log_expr = np.log2(expr_value + 1)  # Log transformation
                 normalized_expr = (log_expr - global_min) / (global_max - global_min + 1e-8)  # Min-max scaling
-                
                 expression_values[gene] = normalized_expr
 
-                if debug_mode and gene in ["GeneA", "GeneB"]: 
-                    print(f"Time {t}, Gene {gene}: Log2+1={log_expr:.2f}, Normalized={normalized_expr:.4f}")
+                #scaled_expr = scaler.transform([[expr_value]])[0][0]
+                #expression_values[gene] = np.clip(scaled_expr, -5, 5)
+
+                expression_values[gene] = expr_value
 
             G = nx.Graph()
             G.add_nodes_from(self.node_map.keys())
@@ -489,6 +489,10 @@ class TemporalGraphDataset:
             edge_weights = []
             for _, row in self.df.iterrows():
                 gene1, gene2 = row['Gene1_clean'], row['Gene2_clean']
+
+                # skip self-loops
+                if gene1 == gene2:
+                    continue
                 
                 expr_sim = 1 / (1 + abs(expression_values[gene1] - expression_values[gene2]))
                 hic_weight = row['HiC_Interaction']
@@ -518,12 +522,30 @@ class TemporalGraphDataset:
                 i, j = self.node_map[gene1], self.node_map[gene2]
                 edge_index.extend([[i, j], [j, i]])
                 edge_weights.extend([weight, weight])
-            
+
+            if nx.is_connected(G):
+                print(f"Graph at time {t} is fully connected!")
+            else:
+                num_components = nx.number_connected_components(G)
+                largest_cc = max(nx.connected_components(G), key=len)  
+                print(f"Graph at time {t} is NOT fully connected! It has {num_components} components.")
+                print(f"Largest component size: {len(largest_cc)}")
+
+                G_largest = G.subgraph(largest_cc).copy()
+                print(f"Using the largest connected component with {G_largest.number_of_nodes()} nodes.")
+
             if debug_mode:
                 print(f"\nEdge Statistics for time {t}:")
                 print(f"Total number of edges: {len(edge_weights)//2}") 
                 print(f"Weight range: [{min(edge_weights):.4f}, {max(edge_weights):.4f}]")
                 print(f"Average weight: {np.mean(edge_weights):.4f}")
+            
+            edge_weights_np = np.array(edge_weights)
+
+            print(f"Min edge weight: {edge_weights_np.min():.4f}")
+            print(f"Max edge weight: {edge_weights_np.max():.4f}")
+            print(f"Mean edge weight: {edge_weights_np.mean():.4f}")
+            print(f"Edge weight standard deviation: {edge_weights_np.std():.4f}")
 
             if debug_mode: print(f"\nRunning Node2Vec for time {t}...")
             node2vec = Node2Vec(
@@ -531,8 +553,8 @@ class TemporalGraphDataset:
                 dimensions=self.embedding_dim, 
                 walk_length=50, 
                 num_walks=10, 
-                p=1.0, 
-                q=1.0, 
+                p=2.5, 
+                q=2.0, 
                 workers=1, 
                 seed=42
             )
@@ -568,9 +590,147 @@ class TemporalGraphDataset:
                 print(f"Expression range after log normalization: [{min(expression_values.values()):.4f}, {max(expression_values.values()):.4f}]")
                 print(f"Embedding range: [{temporal_features[t].min():.4f}, {temporal_features[t].max():.4f}]")
                 print("-" * 50)
+            
+            features_np = temporal_features[t].numpy()
+
+            print(f"Feature matrix shape: {features_np.shape}")  
+            print(f"Feature min value: {features_np.min():.4f}")
+            print(f"Feature max value: {features_np.max():.4f}")
 
         return temporal_features, temporal_edge_indices, temporal_edge_attrs
+    
+    def create_temporal_node_features_several_graphs_mirna_developed(self, debug_mode=True):
+        temporal_features = {}
+        temporal_edge_indices = {}
+        temporal_edge_attrs = {}
 
+    
+        if debug_mode: print("\nCollecting expression values for transformation...")
+        
+        all_expressions = []
+        expression_dict = {}  
+        
+        for t in self.time_points:
+            expression_dict[t] = {}
+            for gene in self.node_map.keys():
+                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                all_expressions.append(expr_value)
+                expression_dict[t][gene] = expr_value
+
+        transformer = QuantileTransformer(
+            output_distribution='normal',
+            n_quantiles=min(len(all_expressions), 1000),
+            random_state=42
+        )
+        
+        all_expressions = np.array(all_expressions).reshape(-1, 1)
+        transformed_expressions = transformer.fit_transform(all_expressions)
+   
+        transformed_expressions = (transformed_expressions - transformed_expressions.min()) / \
+                                (transformed_expressions.max() - transformed_expressions.min() + 1e-8) * 2 - 1
+        
+        if debug_mode:
+            print(f"Original expression range: [{np.min(all_expressions):.4f}, {np.max(all_expressions):.4f}]")
+            print(f"Transformed expression range: [{np.min(transformed_expressions):.4f}, {np.max(transformed_expressions):.4f}]")
+            print(f"Standard deviation before: {np.std(all_expressions):.4f}")
+            print(f"Standard deviation after: {np.std(transformed_expressions):.4f}")
+
+        expr_idx = 0
+        for t in self.time_points:
+            if debug_mode: print(f"\nProcessing time point {t}...")
+
+            expression_values = {}
+            for gene in self.node_map.keys():
+                expression_values[gene] = transformed_expressions[expr_idx][0]
+                expr_idx += 1
+            G = nx.Graph()
+            G.add_nodes_from(self.node_map.keys())
+
+            edge_index = []
+            edge_weights = []
+
+            current_expressions = np.array(list(expression_values.values()))
+            high_threshold = np.percentile(current_expressions, 75)
+            low_threshold = np.percentile(current_expressions, 25)
+            
+            for _, row in self.df.iterrows():
+                gene1, gene2 = row['Gene1_clean'], row['Gene2_clean']
+                if gene1 == gene2:
+                    continue
+
+                expr1 = expression_values[gene1]
+                expr2 = expression_values[gene2]
+                
+                if expr1 > high_threshold and expr2 > high_threshold:
+                    expr_sim = 0.9 * (1 / (1 + abs(expr1 - expr2)))
+                elif expr1 < low_threshold and expr2 < low_threshold:
+                    expr_sim = 0.3 * (1 / (1 + abs(expr1 - expr2)))
+                else:
+                    expr_sim = 0.6 * (1 / (1 + abs(expr1 - expr2)))
+
+                hic_weight = row['HiC_Interaction']
+                compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0 
+                tad_sim = 1 / (1 + abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance']))
+                ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
+
+                weight = (
+                    hic_weight * 0.3 +
+                    compartment_sim * 0.15 +
+                    tad_sim * 0.15 +
+                    ins_sim * 0.15 +
+                    expr_sim * 0.25
+                )
+
+                if weight > 0.05:  # Lower threshold to keep more edges
+                    G.add_edge(gene1, gene2, weight=weight)
+                    i, j = self.node_map[gene1], self.node_map[gene2]
+                    edge_index.extend([[i, j], [j, i]])
+                    edge_weights.extend([weight, weight])
+
+            node2vec = Node2Vec(
+                G, 
+                dimensions=self.embedding_dim, 
+                walk_length=30,
+                num_walks=20, 
+                p=1.2,
+                q=0.8,
+                workers=1,
+                seed=42
+            )
+            model = node2vec.fit(window=5, min_count=1, batch_words=4)
+
+            features = []
+            embedding_values = []
+            for gene in self.node_map.keys():
+                node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
+                embedding_values.append(node_embedding)
+            embedding_values = torch.stack(embedding_values)
+
+            embedding_values = (embedding_values - embedding_values.min()) / \
+                            (embedding_values.max() - embedding_values.min() + 1e-8)
+
+            for i, gene in enumerate(self.node_map.keys()):
+                node_embedding = embedding_values[i]
+                node_embedding[-1] = expression_values[gene]
+                features.append(node_embedding)
+
+            temporal_features[t] = torch.stack(features)
+            temporal_edge_indices[t] = torch.tensor(edge_index).t().contiguous()
+            temporal_edge_attrs[t] = torch.tensor(edge_weights, dtype=torch.float32).unsqueeze(1)
+
+            if debug_mode:
+                features_np = temporal_features[t].numpy()
+                print(f"\nFeature Statistics for time {t}:")
+                print(f"Feature matrix shape: {features_np.shape}")
+                print(f"Feature min value: {features_np.min():.4f}")
+                print(f"Feature max value: {features_np.max():.4f}")
+                print(f"Feature std: {features_np.std():.4f}")
+
+        return temporal_features, temporal_edge_indices, temporal_edge_attrs
+    
     def create_temporal_node_features_several_graphs_created_clustering_closeness_betweenness(self):
         temporal_features = {}
         temporal_edge_indices = {}
@@ -767,7 +927,7 @@ class TemporalGraphDataset:
                 gene_expressions[t][gene] = expr_value
 
         print("\nExpression value check:")
-        for t in self.time_points[:3]:  # First 3 time points
+        for t in self.time_points[:5]:  # First 5 time points
             print(f"\nTime point {t}:")
             for gene in list(self.node_map.keys())[:5]:  # First 5 genes
                 print(f"Gene {gene}: {gene_expressions[t][gene]}")
