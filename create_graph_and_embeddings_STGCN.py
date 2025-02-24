@@ -42,6 +42,25 @@ def normalize_hic_weights(hic_values):
     
     return normalized
 
+def normalize_expression_values(expression_values, debug_mode=True):
+
+    log_expr = np.log2(np.array(expression_values) + 1)
+    
+    scaler = RobustScaler()
+    normalized_expr = scaler.fit_transform(log_expr.reshape(-1, 1)).flatten()
+    
+    if debug_mode:
+        print("\nExpression Statistics:")
+        print(f"Original range: [{min(expression_values):.4f}, {max(expression_values):.4f}]")
+        print(f"Log-transformed range: [{min(log_expr):.4f}, {max(log_expr):.4f}]")
+        print(f"Final normalized range: [{min(normalized_expr):.4f}, {max(normalized_expr):.4f}]")
+        
+        print("\nDistribution stats:")
+        print(f"Mean: {np.mean(normalized_expr):.4f}")
+        print(f"Std: {np.std(normalized_expr):.4f}")
+        
+    return normalized_expr
+
 class TemporalGraphDataset:
     def __init__(self, csv_file, embedding_dim=32, seq_len=3, pred_len=1, graph_params=None, node2vec_params=None): # I change the seq_len to more lower value
         #self.graph_params = graph_params or {}
@@ -68,6 +87,7 @@ class TemporalGraphDataset:
         """
         self.df['Gene1_clean'] = self.df['Gene1']
         self.df['Gene2_clean'] = self.df['Gene2']
+        self.df = self.df.loc[:, ~self.df.columns.str.contains('^Unnamed', case=False)]
 
         unique_genes = pd.concat([self.df['Gene1_clean'], self.df['Gene2_clean']]).unique()
         self.node_map = {gene: idx for idx, gene in enumerate(unique_genes)}
@@ -79,15 +99,17 @@ class TemporalGraphDataset:
         # This is for mRNA data because column names for time points are different
         self.time_points = sorted(list(set([float(col.split('_')[-1])  
                                           for col in self.time_cols if 'Gene1' in col])))
-    
+        self.time_points = [float(tp) for tp in self.time_points] # added for solving type error of time_points
+      
         print(f"Found {len(self.time_points)} time points")
+        print("Extracted time points:", self.time_points)
         
         # Create base graph and features
         self.base_graph = self.create_base_graph()
         print("Base graph created")
         #self.node_features = self.create_temporal_node_features_several_graphs_created_clustering() # try with several graphs for time series consistency
         self.node_features, self.temporal_edge_indices, self.temporal_edge_attrs = \
-        self.create_temporal_node_features_several_graphs_mirna_developed(debug_mode=True)
+        self.create_temporal_node_features_several_graphs_created_mirna(debug_mode=True)
         print("Temporal node features created")
         
         # Get edge information
@@ -435,10 +457,8 @@ class TemporalGraphDataset:
         temporal_edge_indices = {}
         temporal_edge_attrs = {}
 
-        scaler = RobustScaler()
-        # Normalize all expression values across all time points
-        if debug_mode: print("\nApplying log transformation and normalizing expression values...")
-
+        if debug_mode: print("\nCollecting all expression values across time points...")
+        
         all_expressions = []
         all_raw_expressions = []
 
@@ -446,61 +466,96 @@ class TemporalGraphDataset:
             for gene in self.node_map.keys():
                 gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
                 gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
-                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
-                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
                 
-                #log_expr = np.log2(expr_value + 1)  # Log transformation
-                #all_expressions.append(log_expr)
+                expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
+                           (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                
+                all_expressions.append(expr_value)
                 all_raw_expressions.append(expr_value)
 
-                #if debug_mode:
-                    #print(f"Raw expression values range: [{min(all_raw_expressions)}, {max(all_raw_expressions)}]")
-                    #print(f"Number of zero expressions: {sum(1 for x in all_raw_expressions if x == 0)}")
+        # log transformation of expression values before normalization
+        log_expressions = np.log2(np.array(all_expressions) + 1)
+        
+        mean_expr = np.mean(log_expressions)
+        std_expr = np.std(log_expressions)
 
-        # Compute min/max on log-transformed values
-        global_min = min(all_expressions)
-        global_max = max(all_expressions)
-        if debug_mode: print(f"Global expression range after log transformation: [{global_min:.4f}, {global_max:.4f}]")
+        if std_expr < 1e-8:
+            std_expr = 1e-8 
+            
+        if debug_mode:
+            print(f"Raw expression range: [{min(all_raw_expressions):.4f}, {max(all_raw_expressions):.4f}]")
+            print(f"Log-transformed range: [{min(log_expressions):.4f}, {max(log_expressions):.4f}]")
+            print(f"Mean of log expressions: {mean_expr:.4f}")
+            print(f"Std of log expressions: {std_expr:.4f}")
+            print(f"Number of zero expressions: {sum(1 for x in all_raw_expressions if x == 0)}")
 
         for t in self.time_points:
             if debug_mode: print(f"\nProcessing time point {t}...")
 
             expression_values = {}
+            log_expression_values = {}
+            
             for gene in self.node_map.keys():
                 gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
                 gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
 
                 expr_value = gene1_expr[0] if len(gene1_expr) > 0 else \
-                            (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
+                           (gene2_expr[0] if len(gene2_expr) > 0 else 0.0)
                 
-                log_expr = np.log2(expr_value + 1)  # Log transformation
-                normalized_expr = (log_expr - global_min) / (global_max - global_min + 1e-8)  # Min-max scaling
-                expression_values[gene] = normalized_expr
+                log_expr = np.log2(expr_value + 1)
+                normalized_expr = (log_expr - mean_expr) / std_expr  # Z-score normalization with log values 
+                
+                expression_values[gene] = expr_value  
+                log_expression_values[gene] = normalized_expr 
 
-                #scaled_expr = scaler.transform([[expr_value]])[0][0]
-                #expression_values[gene] = np.clip(scaled_expr, -5, 5)
-
-                expression_values[gene] = expr_value
+            if debug_mode:
+                print(f"Time {t} expression range: [{min(expression_values.values()):.4f}, {max(expression_values.values()):.4f}]")
+                print(f"Time {t} normalized range: [{min(log_expression_values.values()):.4f}, {max(log_expression_values.values()):.4f}]")
 
             G = nx.Graph()
             G.add_nodes_from(self.node_map.keys())
 
             edge_index = []
             edge_weights = []
+            processed_edges = set()
+
+            edge_stats = {
+                'total_edges': 0,
+                'self_loops_skipped': 0,
+                'duplicates_skipped': 0
+            }
+            
             for _, row in self.df.iterrows():
                 gene1, gene2 = row['Gene1_clean'], row['Gene2_clean']
-
-                # skip self-loops
+                if gene1 not in self.node_map or gene2 not in self.node_map:
+                    continue
+                    
+                edge_stats['total_edges'] += 1
+                
                 if gene1 == gene2:
+                    edge_stats['self_loops_skipped'] += 1
+                    if debug_mode:
+                        print(f"Skipping self-interaction for gene: {gene1}")
+                    continue
+
+                edge_pair = tuple(sorted([gene1, gene2]))
+                if edge_pair in processed_edges:
+                    if debug_mode:
+                        edge_stats['duplicates_skipped'] += 1
+                        print(f"Skipping duplicate edge: {gene1} -> {gene2}")
                     continue
                 
-                expr_sim = 1 / (1 + abs(expression_values[gene1] - expression_values[gene2]))
+                processed_edges.add(edge_pair)
+
+                # expression similarity using log-transformed normalized values
+                expr_sim = 1 / (1 + abs(log_expression_values[gene1] - log_expression_values[gene2]))
+                
                 hic_weight = row['HiC_Interaction']
                 compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0 
                 tad_sim = 1 / (1 + abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance']))
                 ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
 
-                if debug_mode:
+                if debug_mode and np.random.random() < 0.01:  # Print only 1% of edges to avoid clutter
                     print(f"\nEdge between {gene1} and {gene2}:")
                     print(f"  Expression similarity: {expr_sim:.4f}")
                     print(f"  HiC weight: {hic_weight:.4f}")
@@ -508,20 +563,28 @@ class TemporalGraphDataset:
                     print(f"  TAD similarity: {tad_sim:.4f}")
                     print(f"  Insulation score similarity: {ins_sim:.4f}")
 
-                weight = (hic_weight * 0.3 +
-                        compartment_sim * 0.1 +
-                        tad_sim * 0.1 +
-                        ins_sim * 0.1 +
-                        expr_sim * 0.4)
-                
-                if debug_mode:
-                    print(f"  Final edge weight: {weight:.4f}")
-                    print(f"  Node indices: {self.node_map[gene1]} -> {self.node_map[gene2]}")
+                weight = (hic_weight * 0.35 +
+                          compartment_sim * 0.15 +
+                          tad_sim * 0.15 +
+                          ins_sim * 0.15 +
+                          expr_sim * 0.25)  
+            
+                if weight > 0.3:  # keep relatively strong connections
+                    if debug_mode and np.random.random() < 0.01:
+                        print(f"  Final edge weight: {weight:.4f}")
+                        print(f"  Node indices: {self.node_map[gene1]} -> {self.node_map[gene2]}")
 
-                G.add_edge(gene1, gene2, weight=weight)
-                i, j = self.node_map[gene1], self.node_map[gene2]
-                edge_index.extend([[i, j], [j, i]])
-                edge_weights.extend([weight, weight])
+                    G.add_edge(gene1, gene2, weight=weight)
+                    i, j = self.node_map[gene1], self.node_map[gene2]
+                    edge_index.extend([[i, j], [j, i]])
+                    edge_weights.extend([weight, weight])
+
+            if debug_mode:
+                print("\nEdge Processing Statistics:")
+                print(f"Total edges processed: {edge_stats['total_edges']}")
+                print(f"Self-loops skipped: {edge_stats['self_loops_skipped']}")
+                print(f"Duplicate edges skipped: {edge_stats['duplicates_skipped']}")
+                print(f"Final edges in graph: {len(processed_edges)}")
 
             if nx.is_connected(G):
                 print(f"Graph at time {t} is fully connected!")
@@ -529,11 +592,37 @@ class TemporalGraphDataset:
                 num_components = nx.number_connected_components(G)
                 largest_cc = max(nx.connected_components(G), key=len)  
                 print(f"Graph at time {t} is NOT fully connected! It has {num_components} components.")
-                print(f"Largest component size: {len(largest_cc)}")
+                print(f"Largest component size: {len(largest_cc)} out of {G.number_of_nodes()} nodes.")
 
-                G_largest = G.subgraph(largest_cc).copy()
-                print(f"Using the largest connected component with {G_largest.number_of_nodes()} nodes.")
-
+                # If graph is very disconnected, try adding some additional connections
+                if len(largest_cc) < G.number_of_nodes() * 0.7:  # If largest component has less than 70% of nodes
+                    print("Adding supplementary connections to improve connectivity...")
+                
+                    components = list(nx.connected_components(G))
+                    for comp1 in components:
+                        for comp2 in components:
+                            if comp1 == comp2:
+                                continue
+                                
+                            # Find best gene pair to connect these components
+                            best_weight = 0
+                            best_pair = None
+                            
+                            for gene1 in comp1:
+                                for gene2 in comp2:
+                                    expr_sim = 1 / (1 + abs(log_expression_values[gene1] - log_expression_values[gene2]))
+                                    if expr_sim > best_weight:
+                                        best_weight = expr_sim
+                                        best_pair = (gene1, gene2)
+                            
+                            if best_pair:
+                                gene1, gene2 = best_pair
+                                G.add_edge(gene1, gene2, weight=best_weight)
+                                i, j = self.node_map[gene1], self.node_map[gene2]
+                                edge_index.extend([[i, j], [j, i]])
+                                edge_weights.extend([best_weight, best_weight])
+                                print(f"Added connection between components: {gene1} -> {gene2} (weight: {best_weight:.4f})")
+            
             if debug_mode:
                 print(f"\nEdge Statistics for time {t}:")
                 print(f"Total number of edges: {len(edge_weights)//2}") 
@@ -551,34 +640,40 @@ class TemporalGraphDataset:
             node2vec = Node2Vec(
                 G, 
                 dimensions=self.embedding_dim, 
-                walk_length=50, 
-                num_walks=10, 
-                p=2.5, 
-                q=2.0, 
+                walk_length=30,       
+                num_walks=12,       
+                p=1.0,                # Balance between BFS and DFS
+                q=0.7,                # More focused on local neighborhood
                 workers=1, 
                 seed=42
             )
-            model = node2vec.fit(window=10, min_count=1, batch_words=4)
+            model = node2vec.fit(
+                window=6,         
+                min_count=1, 
+                batch_words=4,
+                epochs=15          
+            )
 
             features = []
             embedding_values = []
             for gene in self.node_map.keys():
-                node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
+                try:
+                    node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
+                except KeyError:
+                    print(f"Warning: Gene {gene} not found in Node2Vec embeddings. Using zeros.")
+                    node_embedding = torch.zeros(self.embedding_dim, dtype=torch.float32)
                 embedding_values.append(node_embedding)
             embedding_values = torch.stack(embedding_values)
 
-            # Min-Max Normalize Embeddings to match expression range [0,1]
-            embedding_min = embedding_values.min()
-            embedding_max = embedding_values.max()
-
-            embedding_values = (embedding_values - embedding_min) / (embedding_max - embedding_min + 1e-8) 
-          
-            if debug_mode and gene in ["GeneA", "GeneB"]:  
-                print(f"Embedding for {gene}: {node_embedding[:5]} ... {node_embedding[-1]:.4f}")
+            embedding_mean = embedding_values.mean(dim=0, keepdim=True)
+            embedding_std = embedding_values.std(dim=0, keepdim=True) 
+            embedding_std[embedding_std < 1e-8] = 1e-8  # Prevent division by zero
+            embedding_values = (embedding_values - embedding_mean) / embedding_std
             
             for i, gene in enumerate(self.node_map.keys()):
                 node_embedding = embedding_values[i]
-                node_embedding[-1] = expression_values[gene]  # Embed normalized expression
+
+                node_embedding[-1] = log_expression_values[gene]
                 features.append(node_embedding)
 
             temporal_features[t] = torch.stack(features)
@@ -587,15 +682,11 @@ class TemporalGraphDataset:
 
             if debug_mode:
                 print(f"\nFeature Statistics for time {t}:")
-                print(f"Expression range after log normalization: [{min(expression_values.values()):.4f}, {max(expression_values.values()):.4f}]")
-                print(f"Embedding range: [{temporal_features[t].min():.4f}, {temporal_features[t].max():.4f}]")
+                print(f"Feature matrix shape: {temporal_features[t].shape}")
+                print(f"Feature range: [{temporal_features[t].min():.4f}, {temporal_features[t].max():.4f}]")
+                print(f"Edge index tensor shape: {temporal_edge_indices[t].shape}")
+                print(f"Edge attribute tensor shape: {temporal_edge_attrs[t].shape}")
                 print("-" * 50)
-            
-            features_np = temporal_features[t].numpy()
-
-            print(f"Feature matrix shape: {features_np.shape}")  
-            print(f"Feature min value: {features_np.min():.4f}")
-            print(f"Feature max value: {features_np.max():.4f}")
 
         return temporal_features, temporal_edge_indices, temporal_edge_attrs
     
