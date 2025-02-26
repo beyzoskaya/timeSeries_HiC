@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv
 from STGCN.model import layers
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
 
 class STGCNChebGraphConv(nn.Module):
     # STGCNChebGraphConv contains 'TGTND TGTND TNFF' structure
@@ -100,13 +101,13 @@ class STGCNChebGraphConvProjected(nn.Module):
                                 bias=args.enable_bias)
             self.fc2 = nn.Linear(in_features=blocks[-2][0], out_features=blocks[-1][0], 
                                 bias=args.enable_bias)
-            self.relu = nn.ReLU()
+            #self.relu = nn.ReLU()
             self.elu = nn.ELU()
             self.dropout = nn.Dropout(p=args.droprate)
         
         #FIXED projection layer is added for prediction of expression values
         self.expression_proj = nn.Sequential(
-        nn.Linear(blocks[-1][0], 32),  # Keep more features initially
+        nn.Linear(blocks[-1][0], 32), 
         nn.ELU(),
         nn.Dropout(p=0.1),
         nn.Linear(32, 16),
@@ -114,13 +115,17 @@ class STGCNChebGraphConvProjected(nn.Module):
         nn.Linear(16, 1)
         )
 
-        self.expression_proj_embedding_dim_16 = nn.Sequential(
-        nn.Linear(blocks[-1][0], 16),  
-        nn.ELU(),
-        nn.Dropout(p=0.1),
-        nn.Linear(16, 8),              
-        nn.ELU(),
-        nn.Linear(8, 1)               
+        self.expression_proj_miRNA = nn.Sequential(
+            nn.Linear(blocks[-1][0], 64),
+            nn.ELU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(64,32),
+            nn.ELU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(32,16),
+            nn.ELU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(16,1)
         )
         
     def forward(self, x):
@@ -141,7 +146,7 @@ class STGCNChebGraphConvProjected(nn.Module):
         # Project to expression values
         batch_size, features, time_steps, nodes = x.shape
         x = x.permute(0, 2, 3, 1)  # [batch, time_steps, nodes, features]
-        x = self.expression_proj(x)  # [batch, time_steps, nodes, 1]
+        x = self.expression_proj_miRNA(x)  # [batch, time_steps, nodes, 1]
         #print("After Projection Shape:", x.shape)
         x = x.permute(0, 3, 1, 2)  # [batch, 1, time_steps, nodes]
         
@@ -227,7 +232,7 @@ class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
         
         return x
 
-
+# This model works best for mRNA predictions with enhanced_temporal_loss
 class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
     def __init__(self, args, blocks, n_vertex, gene_connections):
         super(STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM, self).__init__()
@@ -254,6 +259,17 @@ class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
             bidirectional=True,
             dropout=0.1
         )
+
+        self.lstm_mirna = nn.LSTM(
+            input_size=blocks[-3][-1],  # Input size is the feature dimension
+            hidden_size=blocks[-3][-1],
+            num_layers=4,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.1
+        )
+
+        print(f"Hidden size blocks [-3][-1]: {blocks[-3][-1]}")
     
         self.lstm_proj = nn.Linear(2 * blocks[-3][-1], blocks[-3][-1])  # *2 for bidirectional
         
@@ -264,6 +280,14 @@ class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
             nn.LayerNorm(blocks[-1][0]//2),
             nn.ELU(),
             nn.Linear(blocks[-1][0]//2, 1),
+            nn.Sigmoid()
+        )
+
+        self.connectivity_attention_mirna = nn.Sequential(
+            nn.Linear(blocks[-1][0], blocks[-1][0]),
+            nn.LayerNorm(blocks[-1][0]),
+            nn.ELU(),
+            nn.Linear(blocks[-1][0], 1),
             nn.Sigmoid()
         )
         
@@ -301,7 +325,7 @@ class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
         x_lstm = x.permute(0, 3, 2, 1)  # [batch, nodes, time_steps, features]
         x_lstm = x_lstm.reshape(batch_size * nodes, time_steps, features)
         
-        lstm_out, _ = self.lstm(x_lstm)
+        lstm_out, _ = self.lstm_mirna(x_lstm)
         lstm_out = self.lstm_proj(lstm_out)
         lstm_out = lstm_out.reshape(batch_size, nodes, time_steps, features)
         lstm_out = lstm_out.permute(0, 3, 2, 1)  # Back to [batch, features, time_steps, nodes]
@@ -320,7 +344,7 @@ class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
 
         # Attention mechanism
         x = x.permute(0, 2, 3, 1)  # [batch, time_steps, nodes, features]
-        learned_attention = self.connectivity_attention(x)
+        learned_attention = self.connectivity_attention_mirna(x)
         
         connectivity_weights = self.connection_weights.view(1, 1, -1, 1)
         attention = (learned_attention * (1.0 + self.attention_scale * connectivity_weights))
@@ -540,3 +564,56 @@ class SmallSTGCN(nn.Module):
         
         return x
 
+class STGCNGraphConvProjectedMultiHeadAttention(nn.Module):
+    def __init__(self, args, blocks, n_vertex):
+        super(STGCNGraphConvProjectedMultiHeadAttention, self).__init__()
+        modules = []
+        for l in range(len(blocks) - 3):
+            modules.append(layers.STConvBlock(args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1], 
+                                              args.act_func, args.graph_conv_type, args.gso, args.enable_bias, args.droprate))
+        self.st_blocks = nn.Sequential(*modules)
+        
+        Ko = args.n_his - (len(blocks) - 3) * 2 * (args.Kt - 1)
+        self.Ko = Ko
+        if self.Ko > 1:
+            self.output = layers.OutputBlock(Ko, blocks[-3][-1], blocks[-2], blocks[-1][0], n_vertex, 
+                                             args.act_func, args.enable_bias, args.droprate)
+        elif self.Ko == 0:
+            self.fc1 = nn.Linear(in_features=blocks[-3][-1], out_features=blocks[-2][0], bias=args.enable_bias)
+            self.fc2 = nn.Linear(in_features=blocks[-2][0], out_features=blocks[-1][0], bias=args.enable_bias)
+            self.relu = nn.ReLU()
+            self.do = nn.Dropout(p=args.droprate)
+
+        self.temporal_attention = nn.MultiheadAttention(embed_dim=blocks[-1][0], num_heads=4, batch_first=True)
+
+        self.expression_proj = nn.Sequential(
+            nn.Linear(blocks[-1][0], 16),
+            nn.ReLU(),
+            nn.Linear(16, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1)
+        )
+
+    def forward(self, x):
+        x = self.st_blocks(x)
+        if self.Ko > 1:
+            x = self.output(x)
+        elif self.Ko == 0:
+            x = self.fc1(x.permute(0, 2, 3, 1))
+            x = self.relu(x)
+            x = self.fc2(x).permute(0, 3, 1, 2)
+        
+        batch_size, features, time_steps, nodes = x.shape
+        
+        # [batch, time_steps, nodes, features]
+        x = x.permute(0, 2, 3, 1).reshape(batch_size * nodes, time_steps, features)
+        
+        x, _ = self.temporal_attention(x, x, x)
+        
+        # [batch, time_steps, nodes, features]
+        x = x.reshape(batch_size, nodes, time_steps, features).permute(0, 2, 1, 3)
+        
+        x = self.expression_proj(x)
+        x = x.permute(0, 3, 1, 2)  # [batch, 1, time_steps, nodes]
+        
+        return x
