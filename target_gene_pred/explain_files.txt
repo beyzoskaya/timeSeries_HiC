@@ -1,0 +1,8 @@
+Mouse_Targets.csv file is TargetScan database's Conserved Family Info, all predictions data with only mouse speciey
+Mouse_Targets_Nonconserved.csv file is TargetScan database's Nonconserved Family Info, all predictions Info, all predictions data with only mouse speciey
+Best_Predicted_Genes.csv file is selected target gene based on highest PCT score and the highest k-mer for miRNA families (conserved version)
+Best_Predicted_Genes_Nonconserved.csv file is selected target gene based on highest PCT score and the highest k-mer for miRNA families (nonconserved version)
+Final_Best_Predicted_Genes.csv file containst miRNA family mapped to target gene with PCT score and counting sites. (both conserved and nonconserved)
+no_target_mirnas.csv file is the remaining miRNA family those have no target gene to map. (Only control variables remained)
+final_mirnanorm.csv file contains correct gene symbols for Ensembl Rest API (with their official gene symbols)
+processed_miRNA_with_chromosomes.csv file containts chromosome,start,end information with expression values of time points 
