@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 from sklearn.cluster import AgglomerativeClustering
+import pandas as pd
+from sklearn.mixture import GaussianMixture
 
 def analyze_expression_levels(dataset):
     genes = list(dataset.node_map.keys())
@@ -86,9 +88,9 @@ def analyze_expression_levels_kmeans(dataset, n_clusters=3):
                       sorted_centers[2]: 'high_expr'}
     
     clusters = {
-        'high_expr': [],
+        'low_expr': [],
         'medium_expr': [],
-        'low_expr': []
+        'high_expr': []
     }
 
     for gene, label in zip(genes, cluster_labels):
@@ -119,9 +121,9 @@ def analyze_expression_levels_kmeans(dataset, n_clusters=3):
     return clusters, gene_expressions
 
 def analyze_expression_levels_research(dataset):
-    high_expr_genes = {'VIM', 'tfrc', 'EGFR', 'CD38', 'TGFB1', 'Vegf', 'MMP7', 'MMP-3', 'FOXF2', 'ABCA3', 'Lrp2', 'THTPA', 'ABCG2', 'F13A1', 'Thy1', 'ppia', 'Hist1h1b'}
-    medium_expr_genes = {'ADAMTSL2', 'P-63', 'FGF18', 'GATA-6', 'NME3', 'TTF-1', 'E2F8', 'RAGE', 'GUCY1A2  sGC', 'MGAT4A', 'Igfbp3', 'EPHA7', 'SFTP-D', 'Kcnma1', 'ywhaz', 'hmbs', 'tbp', 'Claudin5', 'Claudin 1', 'MCPt4','integrin subunit alpha 8', 'Tnc'}
-    low_expr_genes = {'INMT', 'Shisa3', 'Hist1h2ab', 'N-Cadherin', 'PRIM2', 'E2F8', 'ABCD1', 'hprt', 'HPGDS', 'AMACR', 'AGER', 'TGFB1'}
+    high_expr_genes = {'VIM', 'tfrc', 'EGFR', 'CD38', 'TGFB1', 'Vegf', 'MMP7', 'MMP-3', 'FOXF2', 'ABCA3', 'Lrp2', 'THTPA', 'F13A1', 'Thy1', 'ppia', 'Hist1h1b', 'ALDH1A1', 'FSP1'} #FIXME: I added ALDH1A1, FSP1 for 52 genes version
+    medium_expr_genes = {'ADAMTSL2', 'P-63', 'FGF18', 'GATA-6', 'NME3', 'TTF-1', 'E2F8', 'RAGE', 'GUCY1A2  sGC', 'MGAT4A', 'Igfbp3', 'EPHA7', 'SFTP-D', 'Kcnma1', 'ywhaz', 'hmbs', 'tbp', 'Claudin5', 'Claudin 1', 'MCPt4','integrin subunit alpha 8', 'Tnc', 'Dnmt3a'} #FIXME: I added Dnmt3a for 52 genes version
+    low_expr_genes = {'INMT', 'Shisa3', 'Hist1h2ab', 'N-Cadherin', 'PRIM2', 'E2F8', 'ABCD1', 'hprt', 'HPGDS', 'AMACR', 'AGER', 'TGFB1','ABCG2'}
 
     genes = list(dataset.node_map.keys())
     gene_expressions = {}
@@ -217,6 +219,60 @@ def analyze_expression_levels_hierarchical(dataset, n_clusters=3):
         print("Genes:", ', '.join(genes_in_cluster[:5]), "..." if len(genes_in_cluster) > 5 else "")
 
     return clusters, gene_expressions
+
+def analyze_expression_levels_gmm(dataset, n_components=3):
+    genes = list(dataset.node_map.keys())
+    gene_expressions = {}
+
+    for gene in genes:
+        expressions = []
+        for t in dataset.time_points:
+            gene1_expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+            gene2_expr = dataset.df[dataset.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+            expr_values = np.concatenate([gene1_expr, gene2_expr])
+            expressions.extend(expr_values)
+
+        mean_expr = np.mean(expressions)
+        gene_expressions[gene] = mean_expr
+
+    mean_expr_values = np.array(list(gene_expressions.values())).reshape(-1, 1)
+    log_expr_values = np.log1p(mean_expr_values)  
+
+    gmm = GaussianMixture(n_components=n_components, random_state=42)
+    cluster_labels = gmm.fit_predict(log_expr_values)
+
+    sorted_centers = np.argsort(gmm.means_.flatten())
+    label_mapping = {sorted_centers[0]: 'low_expr', 
+                     sorted_centers[1]: 'medium_expr', 
+                     sorted_centers[2]: 'high_expr'}
+
+    clusters = {'low_expr': [], 'medium_expr': [], 'high_expr': []}
+
+    for gene, label in zip(genes, cluster_labels):
+        cluster_name = label_mapping[label]
+        clusters[cluster_name].append(gene)
+
+    print("\nGMM Expression Cluster Analysis:")
+    for cluster_name, genes in clusters.items():
+        mean_cluster_expr = np.mean([gene_expressions[g] for g in genes])
+        print(f"\n{cluster_name.upper()} Expression Cluster:")
+        print(f"Number of genes: {len(genes)}")
+        print(f"Average expression: {mean_cluster_expr:.4f}")
+        print("Genes:", ', '.join(genes[:5]), "..." if len(genes) > 5 else "")
+
+    plt.figure(figsize=(10, 6))
+    plt.hist(log_expr_values, bins=30, alpha=0.7, label='Log Expression Levels')
+    for cluster_center in gmm.means_:
+        plt.axvline(cluster_center, color='k', linestyle='--', label=f'Cluster Center: {cluster_center[0]:.4f}')
+    plt.xlabel('Log Mean Expression Level')
+    plt.ylabel('Number of miRNAs')
+    plt.title('GMM-Based Clustering of miRNA Expression Levels')
+    plt.legend()
+    plt.savefig('plottings_STGCN/expression_clusters_gmm.png')
+    plt.close()
+
+    return clusters, gene_expressions
+
 
 
 
