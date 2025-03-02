@@ -261,6 +261,15 @@ class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
             dropout=0.1
         )
 
+        self.lstm_mirna = nn.LSTM(
+            input_size=blocks[-3][-1],  # Now it is 64 for miRNA
+            hidden_size=blocks[-3][-1],
+            num_layers=4,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.1
+        )
+
         print(f"Hidden size blocks [-3][-1]: {blocks[-3][-1]}")
     
         self.lstm_proj = nn.Linear(2 * blocks[-3][-1], blocks[-3][-1])  # *2 for bidirectional
@@ -272,6 +281,14 @@ class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
             nn.LayerNorm(blocks[-1][0]//2),
             nn.ELU(),
             nn.Linear(blocks[-1][0]//2, 1),
+            nn.Sigmoid()
+        )
+
+        self.connectivity_attention_mirna = nn.Sequential(
+            nn.Linear(blocks[-1][0], blocks[-1][0]),
+            nn.LayerNorm(blocks[-1][0]),
+            nn.ELU(),
+            nn.Linear(blocks[-1][0], 1),
             nn.Sigmoid()
         )
         
@@ -298,6 +315,17 @@ class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
             nn.ELU(),
             nn.Linear(16, 1)
         )
+
+        self.expression_proj_mirna = nn.Sequential(
+            nn.Linear(blocks[-1][0], 64),
+            nn.LayerNorm(64),
+            nn.ELU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(64, 32),
+            nn.LayerNorm(32),
+            nn.ELU(),
+            nn.Linear(32, 1)
+        )
         
     def forward(self, x):
         identity = x
@@ -309,7 +337,7 @@ class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
         x_lstm = x.permute(0, 3, 2, 1)  # [batch, nodes, time_steps, features]
         x_lstm = x_lstm.reshape(batch_size * nodes, time_steps, features)
         
-        lstm_out, _ = self.lstm(x_lstm)
+        lstm_out, _ = self.lstm_mirna(x_lstm)
         lstm_out = self.lstm_proj(lstm_out)
         lstm_out = lstm_out.reshape(batch_size, nodes, time_steps, features)
         lstm_out = lstm_out.permute(0, 3, 2, 1)  # Back to [batch, features, time_steps, nodes]
@@ -337,10 +365,116 @@ class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
         x = x * attention + 0.1 * x  # Residual connection
         
         # Final projection
-        x = self.expression_proj(x)
+        x = self.expression_proj_mirna(x)
         x = x.permute(0, 3, 1, 2)
         
         return x
+
+
+class STGCNChebGraphConvProjectedGeneConnectedMultiHeadAttentionLSTMmirna(nn.Module):
+    def __init__(self, args, blocks, n_vertex, gene_connections):
+        super(STGCNChebGraphConvProjectedGeneConnectedMultiHeadAttentionLSTMmirna, self).__init__()
+        
+        connections = torch.tensor([gene_connections.get(i, 0) for i in range(n_vertex)], 
+                                 dtype=torch.float32)
+        self.connection_weights = F.softmax(connections, dim=0)
+        
+        modules = []
+        for l in range(len(blocks) - 3):
+            modules.append(layers.STConvBlock(args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1], 
+                                            args.act_func, args.graph_conv_type, args.gso, 
+                                            args.enable_bias, args.droprate))
+        self.st_blocks = nn.Sequential(*modules)
+        Ko = args.n_his - (len(blocks) - 3) * 2 * (args.Kt - 1)
+        self.Ko = Ko
+
+        self.lstm_mirna = nn.LSTM(
+            input_size=blocks[-3][-1], 
+            hidden_size=blocks[-3][-1],
+            num_layers=4,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.1
+        )
+
+        print(f"Hidden size blocks [-3][-1]: {blocks[-3][-1]}")
+    
+        self.lstm_proj = nn.Linear(2 * blocks[-3][-1], blocks[-3][-1])  # *2 for bidirectional
+        
+        self.lstm_norm = nn.LayerNorm([n_vertex, blocks[-3][-1]])
+        
+        # Multihead attention layer
+        self.multihead_attention = nn.MultiheadAttention(
+            embed_dim=blocks[-3][-1],  # The size of the feature dimension
+            num_heads=4,  
+            dropout=0.1
+        )
+
+        self.attention_scale = nn.Parameter(torch.tensor(0.1))
+
+        if self.Ko > 1:
+            self.output = layers.OutputBlock(Ko, blocks[-3][-1], blocks[-2], blocks[-1][0], 
+                                           n_vertex, args.act_func, args.enable_bias, args.droprate)
+        elif self.Ko == 0:
+            self.fc1 = nn.Linear(in_features=blocks[-3][-1], out_features=blocks[-2][0], 
+                                bias=args.enable_bias)
+            self.fc2 = nn.Linear(in_features=blocks[-2][0], out_features=blocks[-1][0], 
+                                bias=args.enable_bias)
+            self.relu = nn.ReLU()
+            self.dropout = nn.Dropout(p=args.droprate)
+
+        self.expression_proj_mirna = nn.Sequential(
+            nn.Linear(blocks[-1][0], 64),
+            nn.LayerNorm(64),
+            nn.ELU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(64, 32),
+            nn.LayerNorm(32),
+            nn.ELU(),
+            nn.Linear(32, 1)
+        )
+        
+    def forward(self, x):
+        identity = x
+        
+        x = self.st_blocks(x)
+        
+        batch_size, features, time_steps, nodes = x.shape
+        x_lstm = x.permute(0, 3, 2, 1)  # [batch, nodes, time_steps, features]
+        x_lstm = x_lstm.reshape(batch_size * nodes, time_steps, features)
+        
+        lstm_out, _ = self.lstm_mirna(x_lstm)
+        lstm_out = self.lstm_proj(lstm_out)
+        lstm_out = lstm_out.reshape(batch_size, nodes, time_steps, features)
+        lstm_out = lstm_out.permute(0, 3, 2, 1)  # [batch, features, time_steps, nodes]
+        
+        # residual connection  
+        x = x + lstm_out
+        x = self.lstm_norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        
+        if self.Ko > 1:
+            x = self.output(x)
+        elif self.Ko == 0:
+            x = self.fc1(x.permute(0, 2, 3, 1))
+            x = self.relu(x)
+            x = self.dropout(x)
+            x = self.fc2(x).permute(0, 3, 1, 2)
+
+        x = x.permute(2, 0, 3, 1)  # [time_steps, batch, nodes, features]
+        x = x.reshape(time_steps, batch_size * nodes, features)  # [time_steps, batch_size * nodes, features]
+        
+        attn_output, attn_weights = self.multihead_attention(x, x, x)  # Self-attention
+        
+        attn_output = attn_output.reshape(time_steps, batch_size, nodes, features)
+        x = x + attn_output  # Residual connection
+        
+        x = x.permute(1, 3, 2, 0)  # [batch, features, time_steps, nodes]
+
+        x = self.expression_proj_mirna(x)
+        x = x.permute(0, 3, 1, 2)
+        
+        return x
+
     
 class STGCNGraphConv(nn.Module):
     # STGCNGraphConv contains 'TGTND TGTND TNFF' structure
@@ -678,7 +812,7 @@ class MiRNASpecializedSTGCN(nn.Module):
         self.spike_attention = nn.Sequential(
             nn.Linear(blocks[-3][-1], blocks[-3][-1]),
             nn.LayerNorm(blocks[-3][-1]),
-            nn.GELU(),  
+            nn.ELU(),  
             nn.Dropout(0.2),
             nn.Linear(blocks[-3][-1], 1),
             nn.Sigmoid()
@@ -699,21 +833,20 @@ class MiRNASpecializedSTGCN(nn.Module):
         elif self.Ko == 0:
             self.fc1 = nn.Linear(blocks[-3][-1], blocks[-2][0], bias=args.enable_bias)
             self.fc2 = nn.Linear(blocks[-2][0], blocks[-1][0], bias=args.enable_bias)
-            self.act = nn.GELU()
+            self.act = nn.ELU()
             self.dropout = nn.Dropout(p=args.droprate)
         
         self.expression_proj = nn.Sequential(
             nn.Linear(blocks[-1][0], 32),
             nn.LayerNorm(32),
-            nn.GELU(),
+            nn.ELU(),
             nn.Dropout(0.2),
             nn.Linear(32, 16),
             nn.LayerNorm(16),
-            nn.GELU(),
+            nn.ELU(),
             nn.Linear(16, 8),
-            nn.GELU(),
-            nn.Linear(8, 1),
-            nn.Softplus()  
+            nn.ELU(),
+            nn.Linear(8, 1), 
         )
 
         self.skip_conn1 = nn.Linear(blocks[-3][-1], blocks[-1][0])
@@ -752,86 +885,40 @@ class MiRNASpecializedSTGCN(nn.Module):
         x_final = x_final.permute(0, 3, 1, 2)  # [batch, 1, time_steps, nodes]
         
         return x_final
-
-class AdaptiveTemporalAttentionModel(nn.Module):
-    def __init__(self, args, embedding_dim=32):
-        super(AdaptiveTemporalAttentionModel, self).__init__()
-        
-        self.n_vertex = args.n_vertex  # Number of nodes --> number of genes
-        self.n_his = args.n_his        # Historical sequence length --> how many time points are processed for the model
-        self.n_pred = args.n_pred      # Prediction length --> one prediction at a time
-        self.blocks = args.blocks      # Block structure --> block sizes 
-        self.embedding_dim = embedding_dim 
-        
-        self.input_layer = nn.Linear(embedding_dim, self.blocks[0][0])
-        
-        self.temporal_layer = nn.Conv2d(
-            in_channels=self.blocks[0][0],
-            out_channels=self.blocks[0][1],
-            kernel_size=(args.Kt, 1),
-            padding=(1, 0)
-        )
-        
-        self.query_layer = nn.Linear(self.blocks[0][1], self.blocks[0][1])
-        self.key_layer = nn.Linear(self.blocks[0][1], self.blocks[0][1])
-        self.value_layer = nn.Linear(self.blocks[0][1], self.blocks[0][1])
-        self.scale = math.sqrt(self.blocks[0][1])
-        
-        self.output_layer = nn.Sequential(
-            nn.Linear(self.blocks[0][1], self.blocks[1][0]),
-            nn.ReLU(),
-            nn.Dropout(args.droprate),
-            nn.Linear(self.blocks[1][0], self.blocks[2][0]),
-            nn.ReLU(),
-            nn.Linear(self.blocks[2][0], args.n_pred)
-        )
     
+class STGCNChebGraphConvWithAttentionMiRNA(nn.Module):
+    def __init__(self, args, blocks, n_vertex):
+        super(STGCNChebGraphConvWithAttentionMiRNA, self).__init__()
+        
+        self.base_model = STGCNChebGraphConvProjected(args, blocks, n_vertex)
+        
+        self.temporal_attention = nn.Sequential(
+            nn.Linear(blocks[-1][0], blocks[-1][0]),
+            nn.Tanh(),
+            nn.Linear(blocks[-1][0], 1)
+        )
+        
     def forward(self, x):
-        batch_size = x.shape[0]
+        base_output = self.base_model(x)
+    
+        batch_size, channels, time_steps, nodes = base_output.shape
         
-        print(f"Input shape: {x.shape}")
+        features = self.base_model.st_blocks(x)
+        if self.base_model.Ko > 1:
+            features = self.base_model.output(features)
+        elif self.base_model.Ko == 0:
+            features = self.base_model.fc1(features.permute(0, 2, 3, 1))
+            features = self.base_model.elu(features)
+            features = self.base_model.fc2(features).permute(0, 3, 1, 2)
         
-        # Case 1: [batch, channels, time, nodes] (from STGCN data)
-        if len(x.shape) == 4 and x.shape[1] < 5:  # Small number of channels
-            # Convert to [batch, nodes, time, channels]
-            x = x.permute(0, 3, 2, 1)
-            print(f"Permuted from [B,C,T,N] to [B,N,T,C]: {x.shape}")
+        features = features.permute(0, 2, 3, 1)
         
-        # batch, nodes, time, features]
-        nodes = x.shape[1]
-        time_steps = x.shape[2]
+        attention_weights = self.temporal_attention(features)  # [batch, time_steps, nodes, 1]
+        attention_weights = F.softmax(attention_weights, dim=1)  # Normalize along time dimension
         
-        node_outputs = []
+        weighted_output = base_output * attention_weights.permute(0, 3, 1, 2)
         
-        for node_idx in range(nodes):
-            node_features = x[:, node_idx, :, :]  # [batch, time, features]
-            
-            node_features = self.input_layer(node_features)  # [batch, time, block_dim]
-            
-            node_features = node_features.permute(0, 2, 1).unsqueeze(3)  # [batch, block_dim, time, 1]
-            
-            node_features = self.temporal_layer(node_features)  # [batch, block_dim, time-kt+1, 1]
-            node_features = F.relu(node_features)
-            
-            node_features = node_features.squeeze(3).permute(0, 2, 1)  # [batch, time, block_dim]
-            
-            q = self.query_layer(node_features)
-            k = self.key_layer(node_features)
-            v = self.value_layer(node_features)
-            
-            attn_scores = torch.bmm(q, k.transpose(1, 2)) / self.scale
-            attn_weights = F.softmax(attn_scores, dim=-1)
-            context = torch.bmm(attn_weights, v)  # [batch, time, block_dim]
-            
-            pred_input = context[:, -1, :]  # [batch, block_dim]
-        
-            node_pred = self.output_layer(pred_input)  # [batch, n_pred]
-            node_outputs.append(node_pred)
-        
-        # Stack predictions for all nodes: [batch, nodes, n_pred]
-        outputs = torch.stack(node_outputs, dim=1)
-        
-        # [batch, 1, n_pred, nodes]
-        outputs = outputs.permute(0, 2, 1).unsqueeze(1)
-        
-        return outputs
+        return weighted_output
+
+
+
