@@ -19,12 +19,14 @@ sys.path.append('./STGCN')
 from STGCN.model.models import STGCNChebGraphConv
 import argparse
 from scipy.spatial.distance import cdist
-from clustering_by_expr_levels import analyze_expression_levels_research, analyze_expression_levels_kmeans
+from clustering_by_expr_levels import analyze_expression_levels_research, analyze_expression_levels_kmeans,analyze_expression_levels_gmm
 from sklearn.preprocessing import RobustScaler
 from sklearn.preprocessing import QuantileTransformer
 from networkx.algorithms.components import is_connected
 from scipy import stats
 from scipy.spatial.distance import pdist, squareform
+from torch.utils.data import DataLoader, TensorDataset
+import random
 
 def clean_gene_name(gene_name):
     """Clean gene name by removing descriptions and extra information"""
@@ -87,6 +89,10 @@ class TemporalGraphDataset:
       
         print(f"Found {len(self.time_points)} time points")
         print("Extracted time points:", self.time_points)
+
+        self.time_points = [tp for tp in self.time_points if tp != 154.0]
+        self.df = self.df.loc[:, ~self.df.columns.str.contains('Time_154.0', case=False)]
+        print(f"After dropping time point 154.0, remaining time points: {self.time_points}")
         
         # Create base graph and features
         self.base_graph = self.create_base_graph()
@@ -442,7 +448,11 @@ class TemporalGraphDataset:
         temporal_edge_indices = {}
         temporal_edge_attrs = {}
 
-      
+        clusters, _ = analyze_expression_levels_gmm(self)
+        gene_clusters = {}
+        for cluster_name, genes in clusters.items():
+            for gene in genes:
+                gene_clusters[gene] = cluster_name
         
         print("\nNormalizing expression values across all time points...")
         all_expressions = []
@@ -516,23 +526,30 @@ class TemporalGraphDataset:
                     print(f"NaN detected in TAD similarity for {gene1}-{gene2}")
                 if np.isnan(ins_sim):
                     print(f"NaN detected in insulation similarity for {gene1}-{gene2}")
+                
+                if gene_clusters[gene1] == gene_clusters[gene2]:
+                    cluster_sim = 1.2
+                    #print(f"Same cluster: {gene1} ({gene_clusters[gene1]}) - {gene2} ({gene_clusters[gene2]}), Similarity: {cluster_sim}")
+                else:
+                    cluster_sim = 1.0
+                    #print(f"Different clusters: {gene1} ({gene_clusters[gene1]}) - {gene2} ({gene_clusters[gene2]}), Similarity: {cluster_sim}")
 
                 weight = (hic_weight * 0.3 +
                         compartment_sim * 0.1 +
                         tad_sim * 0.1 +
                         ins_sim * 0.1 +
-                        expr_sim * 0.4)
+                        expr_sim * 0.4) 
                 
                 G.add_edge(gene1, gene2, weight=weight)
                 i, j = self.node_map[gene1], self.node_map[gene2]
                 edge_index.extend([[i, j], [j, i]])
                 edge_weights.extend([weight, weight])
-          
+            
             node2vec = Node2Vec(
                 G,
                 dimensions=self.embedding_dim,
-                walk_length=10,
-                num_walks=25,
+                walk_length=25,
+                num_walks=75,
                 p=1.0,
                 q=1.0,
                 workers=1,
@@ -548,30 +565,34 @@ class TemporalGraphDataset:
             features = []
             for gene in self.node_map.keys():
                 node_embedding = torch.tensor(model.wv[gene], dtype=torch.float32)
+                #softplus for node embedding's negative values
+                #node_embedding = torch.log(1 + torch.exp(node_embedding))
                 min_val = node_embedding.min()
                 print(f"Node embedding original value: {node_embedding}")
 
                 print(f"\n{gene} embedding analysis:")
                 print(f"Original last dimension value: {node_embedding[-1]:.4f}")
 
+                #if min_val < 0:
+                #    node_embedding = node_embedding - min_val  
+                #    node_embedding = node_embedding / (node_embedding.max() + 1e-8)
+                #print(f"Node embedding value shifting through zero and normalized: {node_embedding}")
+
                 orig_mean = node_embedding.mean().item()
                 orig_std = node_embedding.std().item()
-
-                if min_val < 0:
-                    node_embedding = node_embedding - min_val  
-                    node_embedding = node_embedding / (node_embedding.max() + 1e-8)
-                print(f"Node embedding value shifting through zero and normalized: {node_embedding}")
                 
                 # Normalize embedding
                 #node_embedding = (node_embedding - node_embedding.min()) / (node_embedding.max() - node_embedding.min() + 1e-8) #FIXME Normalization of embeddings not affect performance in a good way
                 #print(f"Normalized last dimension value: {node_embedding[-1]:.4f}")
-                print(f"Expression value to be inserted: {expression_values[gene]:.4f}")
+
+                #print(f"Expression value to be inserted: {expression_values[gene]:.4f}")
+
                 orig_last_dim = node_embedding[-1].item()
     
-                print(f"Node embeddings last dim before adding expression value: {node_embedding[-1]}")
-                node_embedding[-1] = expression_values[gene]
-                print(f"Node embeddings last dim after adding expression value: {node_embedding[-1]}")
-                print(f"Expression value for {gene}: {node_embedding[-1]}")
+                #print(f"Node embeddings last dim before adding expression value: {node_embedding[-1]}")
+                #node_embedding[-1] = expression_values[gene]
+                #print(f"Node embeddings last dim after adding expression value: {node_embedding[-1]}")
+                #print(f"Expression value for {gene}: {node_embedding[-1]}")
                 
                 print(f"Statistics before override:")
                 print(f"  Mean: {orig_mean:.4f}")
@@ -959,6 +980,80 @@ class TemporalGraphDataset:
         
         return sequences, labels
     
+    def get_temporal_sequences_shuffle(self):
+        sequences = []
+        labels = []
+
+        # First, create a clean dictionary of gene expressions across time
+        gene_expressions = {}
+        for t in self.time_points:
+            # Convert time point to string for column access
+            time_col = f'Gene1_Time_{t}'
+            gene_expressions[t] = {}
+            
+            for gene in self.node_map.keys():
+                # Use the correct column name format
+                gene1_expr = self.df[self.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
+                gene2_expr = self.df[self.df['Gene2_clean'] == gene][f'Gene2_Time_{t}'].values
+                
+                # Take the first non-empty value
+                if len(gene1_expr) > 0:
+                    expr_value = gene1_expr[0]
+                elif len(gene2_expr) > 0:
+                    expr_value = gene2_expr[0]
+                else:
+                    print(f"Warning: No expression found for gene {gene} at time {t}")
+                    expr_value = 0.0
+                    
+                gene_expressions[t][gene] = expr_value
+
+        print("\nExpression value check:")
+        for t in self.time_points[:5]:  # First 5 time points
+            print(f"\nTime point {t}:")
+            for gene in list(self.node_map.keys())[:5]:  # First 5 genes
+                print(f"Gene {gene}: {gene_expressions[t][gene]}")
+        
+        # Create sequences with indices to track order
+        sequence_indices = []
+        for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
+            input_times = self.time_points[i:i+self.seq_len]
+            target_times = self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]
+            
+            print(f"\nSequence {i}:")
+            print(f"Input times: {input_times}")
+            print(f"Target times: {target_times}")
+            
+            seq_graphs = []
+            for t in input_times:
+                features = torch.tensor([gene_expressions[t][gene] for gene in self.node_map.keys()], 
+                                    dtype=torch.float32)
+                graph = self.get_pyg_graph(t)
+                seq_graphs.append(graph)
+            
+            label_graphs = []
+            for t in target_times:
+                graph = self.get_pyg_graph(t)
+                label_graphs.append(graph)
+            
+            sequences.append(seq_graphs)
+            labels.append(label_graphs)
+            sequence_indices.append(i) 
+        
+        random.seed(42)  
+        shuffled_indices = sequence_indices.copy()
+        random.shuffle(shuffled_indices)
+        
+        shuffled_sequences = []
+        shuffled_labels = []
+        for idx in shuffled_indices:
+            shuffled_sequences.append(sequences[idx])
+            shuffled_labels.append(labels[idx])
+        
+        print(f"\nOriginal sequence order: {sequence_indices}")
+        print(f"Shuffled sequence order: {shuffled_indices}")
+        
+        return shuffled_sequences, shuffled_labels
+
     def split_sequences(self,sequences, labels):
         torch.manual_seed(42)
         
