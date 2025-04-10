@@ -368,8 +368,8 @@ class TemporalGraphDataset:
             node2vec = Node2Vec(
                 G,
                 dimensions=self.embedding_dim,
-                walk_length=10,
-                num_walks=30,
+                walk_length=30,
+                num_walks=10,
                 p=1.0,
                 q=1.0,
                 #p=1.739023,
