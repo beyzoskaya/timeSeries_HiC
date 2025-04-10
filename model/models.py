@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv
-from STGCN.model import layers
+from model import layers
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 import math
 
@@ -163,7 +163,7 @@ class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
         
         modules = []
         for l in range(len(blocks) - 3):
-            modules.append(layers.STConvBlock(args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1], 
+            modules.append(layers.STConvBlockTwoSTBlocks(args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1], 
                                             args.act_func, args.graph_conv_type, args.gso, 
                                             args.enable_bias, args.droprate))
         self.st_blocks = nn.Sequential(*modules)
@@ -189,7 +189,7 @@ class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
             self.fc2 = nn.Linear(in_features=blocks[-2][0], out_features=blocks[-1][0], 
                                 bias=args.enable_bias)
             self.relu = nn.ReLU()
-            #self.elu = nn.ELU()
+            self.elu = nn.ELU()
             self.dropout = nn.Dropout(p=args.droprate)
         
         self.expression_proj = nn.Sequential(

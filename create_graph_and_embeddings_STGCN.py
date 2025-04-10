@@ -12,11 +12,11 @@ import os
 import seaborn as sns
 from node2vec import Node2Vec
 from scipy.stats import pearsonr
-from STGCN.model.models import *
+from model.models import *
 import sys
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 sys.path.append('./STGCN')
-from STGCN.model.models import STGCNChebGraphConv
+from model.models import STGCNChebGraphConv
 import argparse
 from scipy.spatial.distance import cdist
 from clustering_by_expr_levels import analyze_expression_levels_research, analyze_expression_levels_kmeans,analyze_expression_levels_gmm
@@ -57,8 +57,8 @@ class TemporalGraphDataset:
         self.df = pd.read_csv(csv_file)
         print(f"Before cleaning the gene names Gene1: {self.df['Gene1']}")
         print(f"Before cleaning the gene names Gene2: {self.df['Gene2']}")
-        #self.df['Gene1_clean'] = self.df['Gene1'].apply(clean_gene_name)
-        #self.df['Gene2_clean'] = self.df['Gene2'].apply(clean_gene_name)
+        self.df['Gene1_clean'] = self.df['Gene1'].apply(clean_gene_name)
+        self.df['Gene2_clean'] = self.df['Gene2'].apply(clean_gene_name)
 
         #genes_to_remove = {'THTPA', 'AMACR', 'MMP7', 'ABCG2', 'HPGDS', 'VIM'}
         # Filter out genes which gave negative correlation to see performance of other genes 
@@ -66,13 +66,6 @@ class TemporalGraphDataset:
         #self.df = self.df[~self.df['Gene2_clean'].isin(genes_to_remove)]
         
         # Create static node mapping
-
-        """
-        I added this to not change proper parts for cleaning gene name because in miRNA data, all genes are in cleaned format
-        """
-        self.df['Gene1_clean'] = self.df['Gene1']
-        self.df['Gene2_clean'] = self.df['Gene2']
-        self.df = self.df.loc[:, ~self.df.columns.str.contains('^Unnamed', case=False)]
 
         unique_genes = pd.concat([self.df['Gene1_clean'], self.df['Gene2_clean']]).unique()
         self.node_map = {gene: idx for idx, gene in enumerate(unique_genes)}
@@ -99,7 +92,7 @@ class TemporalGraphDataset:
         print("Base graph created")
         #self.node_features = self.create_temporal_node_features_several_graphs_created_clustering() # try with several graphs for time series consistency
         self.node_features, self.temporal_edge_indices, self.temporal_edge_attrs = \
-        self.create_temporal_node_features_several_graphs_created_mirna(debug_mode=True)
+        self.create_temporal_node_features_several_graphs_created_clustering()
         print("Temporal node features created")
         
         # Get edge information
@@ -377,7 +370,7 @@ class TemporalGraphDataset:
                 dimensions=self.embedding_dim,
                 walk_length=10,
                 num_walks=25,
-                p=1.0,
+                p=2.0,
                 q=1.0,
                 #p=1.739023,
                 #q=1.6722,

@@ -711,3 +711,40 @@ class SmallSTBlock(nn.Module):
             
         return x * self.lr_scale 
 
+class STConvBlockTwoSTBlocks(nn.Module):
+    def __init__(self, Kt, Ks, n_vertex, last_block_channel, channels, act_func, graph_conv_type, gso, bias, droprate):
+        super(STConvBlockTwoSTBlocks, self).__init__()
+        self.gso = gso
+        self.tmp_conv1 = TemporalConvLayer(Kt, last_block_channel, channels[0], n_vertex, act_func)
+        self.graph_conv = GraphConvLayer(graph_conv_type, channels[0], channels[1], Ks, gso, bias)
+        self.tmp_conv2 = TemporalConvLayer(Kt, channels[1], channels[2], n_vertex, act_func)
+
+        print(f"channels[0]: {channels[2]}")
+        print(f"channels[1]: {channels[2]}")
+        print(f"channels[2]: {channels[2]}")
+        
+        self.attention = nn.Sequential(
+            nn.Conv2d(channels[2], channels[2], kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        self.tc2_ln = nn.LayerNorm([n_vertex, channels[2]], eps=1e-12)
+        self.elu = nn.ELU()
+        self.dropout = nn.Dropout(p=droprate)
+
+    def forward(self, x):
+        #print(f"STBlock input shape: {x.shape}")
+        x = self.tmp_conv1(x)
+        #print(f"After first temporal conv: {x.shape}")
+        x = self.graph_conv(x)
+        #print(f"After graph conv: {x.shape}")
+        x = self.elu(x)
+        x = self.tmp_conv2(x)
+        #print(f"After second temporal conv: {x.shape}")
+        
+        x = x * self.attention(x)
+        
+        x = self.tc2_ln(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        x = self.dropout(x)
+        
+        return x

@@ -11,18 +11,18 @@ import matplotlib.pyplot as plt
 import os
 import seaborn as sns
 from node2vec import Node2Vec
-from scipy.stats import pearsonr
-from STGCN.model.models import *
+from scipy.stats import pearsonr,spearmanr
+from model.models import *
 import sys
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 sys.path.append('./STGCN')
-from STGCN.model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected, STGCNGraphConv, STGCNGraphConvProjected, STGCNChebGraphConvProjectedGeneConnectedAttention
+from model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected, STGCNGraphConv, STGCNGraphConvProjected, STGCNChebGraphConvProjectedGeneConnectedAttention, STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM
 import argparse
 from scipy.spatial.distance import cdist
 from create_graph_and_embeddings_STGCN import *
 from STGCN_losses import temporal_loss_for_projected_model, enhanced_temporal_loss, gene_specific_loss
 from evaluation import *
-from ontology_analysis import analyze_expression_levels_kmeans
+from clustering_by_expr_levels import analyze_expression_levels_kmeans
     
 def process_batch(seq, label):
     """Process batch data for training."""
@@ -131,7 +131,7 @@ def train_stgcn(dataset,val_ratio=0.2):
 
     #model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
     gene_connections = compute_gene_connections(dataset)
-    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.blocks, args.n_vertex, gene_connections)
+    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.two_blocks, args.n_vertex, gene_connections)
     #model =STGCNChebGraphConvWithTemporalAttention(args, args.blocks, args.n_vertex, gene_connections)
     model = model.float() # convert model to float otherwise I am getting type error
 
@@ -237,7 +237,7 @@ def train_stgcn(dataset,val_ratio=0.2):
                     x,
                     gene_correlations=gene_correlations 
                 )
-                val_loss_total += val_loss.item()
+                val_loss_total += val_loss.item()  
 
                 output_corr = calculate_correlation(output)
                 #print(f"Shape of output corr: {output_corr.shape}") # [32, 32]
@@ -515,22 +515,27 @@ def calculate_gene_metrics(predictions, targets, dataset):
     # Per-gene correlations
     gene_correlations = []
     gene_rmse = []
-    
+    gene_spearman_correlations = []
+
     for gene_idx, gene in enumerate(genes):
         pred_gene = predictions[:, gene_idx]  # All timepoints for this gene
         true_gene = targets[:, gene_idx]
         
         corr, _ = pearsonr(pred_gene, true_gene)
+        spearman_corr, spearman_p = spearmanr(pred_gene, true_gene)
         rmse = np.sqrt(mean_squared_error(true_gene, pred_gene))
         
         gene_correlations.append((gene, corr))
+        gene_spearman_correlations.append((gene, spearman_corr))
         gene_rmse.append(rmse)
     
     # Sort genes by correlation
     gene_correlations.sort(key=lambda x: x[1], reverse=True)
     
     metrics['Mean_Correlation'] = np.mean([corr for _, corr in gene_correlations])
-    metrics['Best_Genes'] = [gene for gene, _ in gene_correlations[:5]]
+    metrics['Mean_Spearman_Correlation'] = np.mean([corr for _, corr in gene_spearman_correlations])
+    metrics['Best_Genes_Pearson'] = [gene for gene, _ in gene_correlations[:5]]
+    metrics['Best_Genes_Spearman'] = [gene for gene, _ in gene_spearman_correlations[:5]]
     metrics['Gene_RMSE'] = {gene: rmse for gene, rmse in zip(genes, gene_rmse)}
     
     return metrics
@@ -986,6 +991,21 @@ class Args:
             [32, 48, 48],    # Single ST block (since temporal dim reduces quickly)
             [48, 32, 1]      # Output block
         ]
+
+        self.two_blocks = [
+            [32, 32, 32],
+            [32, 48, 48],
+            [48, 16, 16],
+            [16, 32, 1]
+        ]
+
+        self.blocks_temporal_node2vec_with_three_st_blocks_32dim_smoother = [
+            [32, 32, 32],        # Initial block (1/8 scale of 256)
+            [32, 28, 28],        # First reduction (matches 256→224 ratio)
+            [28, 24, 24],        # Second reduction (matches 224→192 ratio)
+            [24, 28, 28],        # Expansion block (matches 192→224 ratio)
+            [28, 16, 1]          # Final reduction (matches 224→128 ratio)
+        ]
     
         self.act_func = 'glu'
         self.graph_conv_type = 'cheb_graph_conv'
@@ -994,7 +1014,7 @@ class Args:
 
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
-        csv_file='mapped/enhanced_interactions_new_new.csv',
+        csv_file='/Users/beyzakaya/Desktop/timeSeries_HiC/mapped/mRNA/enhanced_interactions_synthetic_simple_mRNA.csv',
         embedding_dim=32,
         seq_len=3,
         pred_len=1
@@ -1012,7 +1032,9 @@ if __name__ == "__main__":
 
     print("\nGene Performance:")
     print(f"Mean Gene Correlation: {metrics['Gene']['Mean_Correlation']:.4f}")
-    print(f"Best Performing Genes: {', '.join(metrics['Gene']['Best_Genes'])}")
+    print(f"Mean Spearman Correlation: {metrics['Gene']['Mean_Spearman_Correlation']:.4f}")
+    print(f"Best Performing Genes Pearson: {', '.join(metrics['Gene']['Best_Genes_Pearson'])}")
+    print(f"Best Performing Genes Spearman: {', '.join(metrics['Gene']['Best_Genes_Spearman'])}")
 
     print("\nTemporal Performance:")
     print(f"Time-lagged Correlation: {metrics['Temporal']['Mean_Temporal_Correlation']:.4f}")

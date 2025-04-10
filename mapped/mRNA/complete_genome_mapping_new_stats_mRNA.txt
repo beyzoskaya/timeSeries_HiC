@@ -1,0 +1,7 @@
+Mapping Statistics
+=================
+Total_Genes: 126
+Mapped_Interactions: 69
+Skipped_Interactions: 249
+Processed_Chromosomes: 20
+Time_Points: 43
