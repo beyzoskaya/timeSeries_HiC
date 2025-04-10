@@ -131,7 +131,7 @@ def train_stgcn(dataset,val_ratio=0.2):
 
     #model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
     gene_connections = compute_gene_connections(dataset)
-    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.two_blocks, args.n_vertex, gene_connections)
+    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.two_blocks_64_dim_embedding, args.n_vertex, gene_connections)
     #model =STGCNChebGraphConvWithTemporalAttention(args, args.blocks, args.n_vertex, gene_connections)
     model = model.float() # convert model to float otherwise I am getting type error
 
@@ -999,12 +999,26 @@ class Args:
             [16, 32, 1]
         ]
 
+        self.two_blocks_16_dim_embedding = [
+            [16, 16, 16],
+            [16, 24, 24],
+            [24, 8, 8],
+            [8, 16, 1]
+        ]
+
+        self.two_blocks_64_dim_embedding = [
+            [64, 64, 64],
+            [64, 48, 48],
+            [48, 32, 32],
+            [32, 64, 1]
+        ]
+
         self.blocks_temporal_node2vec_with_three_st_blocks_32dim_smoother = [
-            [32, 32, 32],        # Initial block (1/8 scale of 256)
-            [32, 28, 28],        # First reduction (matches 256→224 ratio)
-            [28, 24, 24],        # Second reduction (matches 224→192 ratio)
-            [24, 28, 28],        # Expansion block (matches 192→224 ratio)
-            [28, 16, 1]          # Final reduction (matches 224→128 ratio)
+            [32, 32, 32],      # Initial block
+            [32, 32, 32],      # Maintain dimension
+            [32, 28, 28],      # First reduction
+            [28, 28, 28],      # Stabilize dimension
+            [28, 16, 1]        # Final output
         ]
     
         self.act_func = 'glu'
@@ -1015,7 +1029,7 @@ class Args:
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
         csv_file='/Users/beyzakaya/Desktop/timeSeries_HiC/mapped/mRNA/enhanced_interactions_synthetic_simple_mRNA.csv',
-        embedding_dim=32,
+        embedding_dim=64,
         seq_len=3,
         pred_len=1
     )

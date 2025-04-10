@@ -1,0 +1,207 @@
+Model Performance Summary:
+
+Overall Metrics:
+MSE: 0.0018
+RMSE: 0.0420
+MAE: 0.0298
+R2_Score: 0.9661
+Pearson_Correlation: 0.9832
+
+Gene Performance:
+Mean Gene Correlation: 0.6003
+Mean Spearman Correlation: 0.4993
+Best Performing Genes Pearson: VIM, INMT, ADAMTSL2, Shisa3, Hist1h1b
+Best Performing Genes Spearman: ABCA3, ABCD1, ABCG2, ADAMTSL2, AGER
+
+Temporal Performance:
+Time-lagged Correlation: 0.7321
+DTW Distance: 0.1998
+Direction Accuracy: 0.6122
+Change Magnitude Ratio: 0.9198
+Gene Analysis Summary:
+
+Top 5 Most Connected Genes:
+ABCA3: 8 connections, correlation: 0.8488
+MCPt4: 7 connections, correlation: 0.4467
+NME3: 7 connections, correlation: 0.4422
+VIM: 7 connections, correlation: 0.9692
+EGFR: 6 connections, correlation: 0.5333
+
+Top 5 Most Variable Genes:
+INMT: range 9.1897, correlation: 0.9523
+EPHA7: range 7.1095, correlation: 0.0969
+SFTP-D: range 6.8913, correlation: 0.7506
+TGFB1: range 6.6275, correlation: 0.6927
+Hist1h2ab: range 6.4284, correlation: 0.7721
+
+Top 5 Best Predicted Genes:
+VIM: correlation 0.9692, connections: 7
+INMT: correlation 0.9523, connections: 2
+ADAMTSL2: correlation 0.9458, connections: 5
+Shisa3: correlation 0.9452, connections: 1
+Hist1h1b: correlation 0.9396, connections: 3
+
+Correlation values for all genes:
+VIM: correlation 0.9692, connections: 7
+INMT: correlation 0.9523, connections: 2
+ADAMTSL2: correlation 0.9458, connections: 5
+Shisa3: correlation 0.9452, connections: 1
+Hist1h1b: correlation 0.9396, connections: 3
+FGF18: correlation 0.9354, connections: 3
+Tnc: correlation 0.9289, connections: 1
+P-63: correlation 0.9264, connections: 3
+THTPA: correlation 0.9101, connections: 6
+MMP-3: correlation 0.8900, connections: 4
+F13A1: correlation 0.8728, connections: 3
+Kcnma1: correlation 0.8629, connections: 4
+hmbs: correlation 0.8603, connections: 4
+tfrc: correlation 0.8488, connections: 6
+ABCA3: correlation 0.8488, connections: 8
+RAGE: correlation 0.8319, connections: 5
+Vegf: correlation 0.8278, connections: 6
+integrin subunit alpha 8: correlation 0.8160, connections: 6
+Hist1h2ab: correlation 0.7721, connections: 3
+Claudin5: correlation 0.7682, connections: 3
+CD38: correlation 0.7661, connections: 1
+Lrp2: correlation 0.7537, connections: 4
+SFTP-D: correlation 0.7506, connections: 3
+N-Cadherin: correlation 0.7282, connections: 1
+GUCY1A2  sGC: correlation 0.6961, connections: 4
+GATA-6: correlation 0.6937, connections: 2
+TGFB1: correlation 0.6927, connections: 4
+E2F8: correlation 0.6920, connections: 4
+FOXF2: correlation 0.6229, connections: 3
+ppia: correlation 0.6207, connections: 4
+Igfbp3: correlation 0.6193, connections: 4
+Thy1: correlation 0.5705, connections: 4
+PRIM2: correlation 0.5691, connections: 4
+EGFR: correlation 0.5333, connections: 6
+tbp: correlation 0.5123, connections: 6
+ABCD1: correlation 0.4994, connections: 2
+Claudin 1: correlation 0.4606, connections: 3
+MCPt4: correlation 0.4467, connections: 7
+NME3: correlation 0.4422, connections: 7
+MGAT4A: correlation 0.3403, connections: 5
+MMP7: correlation 0.2613, connections: 4
+HPGDS: correlation 0.2528, connections: 6
+hprt: correlation 0.2018, connections: 4
+TTF-1: correlation 0.1643, connections: 5
+EPHA7: correlation 0.0969, connections: 2
+ABCG2: correlation -0.1038, connections: 3
+ywhaz: correlation -0.2174, connections: 3
+AMACR: correlation -0.3377, connections: 3
+AGER: correlation -0.5685, connections: 5
+
+Temporal Analysis:
+Best predicted time point: 5
+Worst predicted time point: 6
+Mean accuracy: 0.9832
+Std of accuracy: 0.0096
+
+Gene: THTPA
+------------------------------
+Number of connections: 7
+Average HiC interaction weight: 156.0100
+Compartment matches: 6
+Expression standard deviation: 0.6985
+Average TAD boundary distance: 11.7143
+
+HiC Interactions:
+Min HiC weight: 40.9577
+Max HiC weight: 702.5532
+Mean HiC weight: 156.0100
+
+Expression Statistics:
+Min expression: 2.6625
+Max expression: 5.0578
+Expression range: 2.3953
+
+Gene: AMACR
+------------------------------
+Number of connections: 3
+Average HiC interaction weight: 64.0525
+Compartment matches: 0
+Expression standard deviation: 0.4270
+Average TAD boundary distance: 5.6667
+
+HiC Interactions:
+Min HiC weight: 43.5666
+Max HiC weight: 74.2955
+Mean HiC weight: 64.0525
+
+Expression Statistics:
+Min expression: 2.0765
+Max expression: 4.1755
+Expression range: 2.0990
+
+Gene: MMP7
+------------------------------
+Number of connections: 4
+Average HiC interaction weight: 780.9543
+Compartment matches: 2
+Expression standard deviation: 0.3811
+Average TAD boundary distance: 0.2500
+
+HiC Interactions:
+Min HiC weight: 38.5510
+Max HiC weight: 2861.8364
+Mean HiC weight: 780.9543
+
+Expression Statistics:
+Min expression: 1.8616
+Max expression: 3.5450
+Expression range: 1.6834
+
+Gene: ABCG2
+------------------------------
+Number of connections: 3
+Average HiC interaction weight: 103.6309
+Compartment matches: 3
+Expression standard deviation: 0.4807
+Average TAD boundary distance: 4.6667
+
+HiC Interactions:
+Min HiC weight: 93.3175
+Max HiC weight: 109.3187
+Mean HiC weight: 103.6309
+
+Expression Statistics:
+Min expression: 5.0268
+Max expression: 7.3685
+Expression range: 2.3417
+
+Gene: HPGDS
+------------------------------
+Number of connections: 6
+Average HiC interaction weight: 121.3054
+Compartment matches: 6
+Expression standard deviation: 0.4271
+Average TAD boundary distance: 3.7500
+
+HiC Interactions:
+Min HiC weight: 65.7671
+Max HiC weight: 155.5075
+Mean HiC weight: 121.3054
+
+Expression Statistics:
+Min expression: 3.0477
+Max expression: 4.7807
+Expression range: 1.7331
+
+Gene: VIM
+------------------------------
+Number of connections: 7
+Average HiC interaction weight: 123.2517
+Compartment matches: 6
+Expression standard deviation: 0.7726
+Average TAD boundary distance: 1.1429
+
+HiC Interactions:
+Min HiC weight: 27.4005
+Max HiC weight: 621.5139
+Mean HiC weight: 123.2517
+
+Expression Statistics:
+Min expression: 5.6784
+Max expression: 8.3564
+Expression range: 2.6780
