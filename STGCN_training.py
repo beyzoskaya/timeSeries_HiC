@@ -131,12 +131,12 @@ def train_stgcn(dataset,val_ratio=0.2):
 
     #model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
     gene_connections = compute_gene_connections(dataset)
-    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.two_blocks_64_dim_embedding, args.n_vertex, gene_connections)
+    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.two_blocks, args.n_vertex, gene_connections)
     #model =STGCNChebGraphConvWithTemporalAttention(args, args.blocks, args.n_vertex, gene_connections)
     model = model.float() # convert model to float otherwise I am getting type error
 
     optimizer = optim.Adam(model.parameters(), lr=0.0007, weight_decay=1e-5)
-    #criterion = nn.MSELoss()
+    criterion = nn.MSELoss()
 
     gene_correlations = compute_gene_correlations(dataset, model)
     print("Gene Correlations:", gene_correlations)
@@ -192,14 +192,14 @@ def train_stgcn(dataset,val_ratio=0.2):
             #    x
             #)
 
-            loss = gene_specific_loss(
-                output[:, :, -1:, :],
-                target,
-                x,
-                gene_correlations=gene_correlations 
-                )
+            #loss = gene_specific_loss(
+            #    output[:, :, -1:, :],
+            #    target,
+            #    x,
+            #    gene_correlations=gene_correlations 
+            #    )
 
-            #loss = criterion(output[:, :, -1:, :], target)
+            loss = criterion(output[:, :, -1:, :], target)
             if torch.isnan(loss):
                 print("NaN loss detected!")
                 print(f"Output range: [{output.min().item():.4f}, {output.max().item():.4f}]")
@@ -229,14 +229,14 @@ def train_stgcn(dataset,val_ratio=0.2):
                 #print(f"Shape of output in validation: {output.shape}") # --> [1, 32, 5, 52]
                 #print(f"Shape of target in validation: {target.shape}") # --> [32, 1, 52]
                 #target = target[:,:,-1:, :]
-                #val_loss = criterion(output[:, :, -1:, :], target)
+                val_loss = criterion(output[:, :, -1:, :], target)
                 #val_loss = enhanced_temporal_loss(output[:, :, -1:, :], target, x)
-                val_loss = gene_specific_loss(
-                    output[:, :, -1:, :],
-                    target,
-                    x,
-                    gene_correlations=gene_correlations 
-                )
+                #val_loss = gene_specific_loss(
+                #    output[:, :, -1:, :],
+                #    target,
+                #    x,
+                #    gene_correlations=gene_correlations 
+                #)
                 val_loss_total += val_loss.item()  
 
                 output_corr = calculate_correlation(output)
@@ -1029,7 +1029,7 @@ class Args:
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
         csv_file='/Users/beyzakaya/Desktop/timeSeries_HiC/mapped/mRNA/enhanced_interactions_synthetic_simple_mRNA.csv',
-        embedding_dim=64,
+        embedding_dim=32,
         seq_len=3,
         pred_len=1
     )

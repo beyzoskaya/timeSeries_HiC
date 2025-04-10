@@ -47,7 +47,7 @@ def normalize_hic_weights(hic_values):
     return normalized
 
 class TemporalGraphDataset:
-    def __init__(self, csv_file, embedding_dim=64, seq_len=5, pred_len=1, graph_params=None, node2vec_params=None): # I change the seq_len to more lower value
+    def __init__(self, csv_file, embedding_dim=32, seq_len=5, pred_len=1, graph_params=None, node2vec_params=None): # I change the seq_len to more lower value
         #self.graph_params = graph_params or {}
         #self.node2vec_params = node2vec_params or {}
         self.seq_len = seq_len
