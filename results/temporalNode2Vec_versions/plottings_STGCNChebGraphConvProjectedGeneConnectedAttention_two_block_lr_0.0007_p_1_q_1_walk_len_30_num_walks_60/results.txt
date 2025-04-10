@@ -1,0 +1,99 @@
+Model Performance Summary:
+
+Overall Metrics:
+MSE: 0.2515
+RMSE: 0.5015
+MAE: 0.3993
+R2_Score: 0.2911
+Pearson_Correlation: 0.5694
+
+Gene Performance:
+Mean Gene Correlation: 0.4943
+Mean Spearman Correlation: 0.4106
+Best Performing Genes Pearson: ABCD1, MMP7, hprt, TTF-1, AMACR
+Best Performing Genes Spearman: ABCA3, ABCD1, ABCG2, ADAMTSL2, AGER
+
+Temporal Performance:
+Time-lagged Correlation: 0.6578
+DTW Distance: 2.8048
+Direction Accuracy: 0.5977
+Change Magnitude Ratio: 0.7613
+Gene Analysis Summary:
+
+Top 5 Most Connected Genes:
+ABCA3: 8 connections, correlation: 0.2038
+MCPt4: 7 connections, correlation: -0.0511
+NME3: 7 connections, correlation: 0.2035
+VIM: 7 connections, correlation: 0.5021
+EGFR: 6 connections, correlation: 0.7357
+
+Top 5 Most Variable Genes:
+INMT: range 9.1897, correlation: 0.6471
+EPHA7: range 7.1095, correlation: 0.7800
+SFTP-D: range 6.8913, correlation: 0.6087
+TGFB1: range 6.6275, correlation: 0.6382
+Hist1h2ab: range 6.4284, correlation: 0.1043
+
+Top 5 Best Predicted Genes:
+ABCD1: correlation 0.9464, connections: 2
+MMP7: correlation 0.9104, connections: 4
+hprt: correlation 0.8803, connections: 4
+TTF-1: correlation 0.8750, connections: 5
+AMACR: correlation 0.8679, connections: 3
+
+Correlation values for all genes:
+ABCD1: correlation 0.9464, connections: 2
+MMP7: correlation 0.9104, connections: 4
+hprt: correlation 0.8803, connections: 4
+TTF-1: correlation 0.8750, connections: 5
+AMACR: correlation 0.8679, connections: 3
+Shisa3: correlation 0.8655, connections: 1
+ADAMTSL2: correlation 0.8603, connections: 5
+CD38: correlation 0.8321, connections: 1
+Tnc: correlation 0.8302, connections: 1
+EPHA7: correlation 0.7800, connections: 2
+MMP-3: correlation 0.7477, connections: 4
+Lrp2: correlation 0.7401, connections: 4
+EGFR: correlation 0.7357, connections: 6
+ywhaz: correlation 0.6907, connections: 3
+GUCY1A2  sGC: correlation 0.6874, connections: 4
+tfrc: correlation 0.6644, connections: 6
+INMT: correlation 0.6471, connections: 2
+Claudin5: correlation 0.6457, connections: 3
+TGFB1: correlation 0.6382, connections: 4
+ABCG2: correlation 0.6257, connections: 3
+E2F8: correlation 0.6211, connections: 4
+SFTP-D: correlation 0.6087, connections: 3
+Kcnma1: correlation 0.6051, connections: 4
+FGF18: correlation 0.5982, connections: 3
+MGAT4A: correlation 0.5677, connections: 5
+tbp: correlation 0.5553, connections: 6
+VIM: correlation 0.5021, connections: 7
+Claudin 1: correlation 0.4680, connections: 3
+integrin subunit alpha 8: correlation 0.4385, connections: 6
+hmbs: correlation 0.4308, connections: 4
+Igfbp3: correlation 0.4023, connections: 4
+P-63: correlation 0.3783, connections: 3
+ppia: correlation 0.3438, connections: 4
+GATA-6: correlation 0.3358, connections: 2
+HPGDS: correlation 0.3234, connections: 6
+Thy1: correlation 0.3170, connections: 4
+N-Cadherin: correlation 0.3112, connections: 1
+Vegf: correlation 0.2460, connections: 6
+ABCA3: correlation 0.2038, connections: 8
+NME3: correlation 0.2035, connections: 7
+PRIM2: correlation 0.2004, connections: 4
+F13A1: correlation 0.1388, connections: 3
+FOXF2: correlation 0.1064, connections: 3
+Hist1h2ab: correlation 0.1043, connections: 3
+Hist1h1b: correlation 0.0758, connections: 3
+THTPA: correlation -0.0414, connections: 6
+MCPt4: correlation -0.0511, connections: 7
+RAGE: correlation -0.0992, connections: 5
+AGER: correlation -0.1438, connections: 5
+
+Temporal Analysis:
+Best predicted time point: 3
+Worst predicted time point: 5
+Mean accuracy: 0.5873
+Std of accuracy: 0.2049
