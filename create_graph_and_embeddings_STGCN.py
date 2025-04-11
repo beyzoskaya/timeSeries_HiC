@@ -29,7 +29,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import random
 
 class TemporalNode2Vec:
-    def __init__(self, dimensions=32, walk_length=80, num_walks=10, p=1.0, q=1.0, workers=1, seed=42, temporal_weight=0.5): # temporal_weight 0.5 gave the best correlation value (from 0.6 it gets more overfit!!!)
+    def __init__(self, dimensions=64, walk_length=25, num_walks=75, p=1.0, q=1.0, workers=1, seed=42, temporal_weight=0.5): # temporal_weight 0.5 gave the best correlation value (from 0.6 it gets more overfit!!!)
         self.dimensions = dimensions
         print(f"Embedding dimension in TemporalNode2Vec: {self.dimensions}")
         self.walk_length = walk_length
@@ -179,7 +179,7 @@ def normalize_hic_weights(hic_values):
     return normalized
 
 class TemporalGraphDataset:
-    def __init__(self, csv_file, embedding_dim=32, seq_len=5, pred_len=1, graph_params=None, node2vec_params=None): # I change the seq_len to more lower value
+    def __init__(self, csv_file, embedding_dim=64, seq_len=5, pred_len=1, graph_params=None, node2vec_params=None): # I change the seq_len to more lower value
         #self.graph_params = graph_params or {}
         #self.node2vec_params = node2vec_params or {}
         self.seq_len = seq_len
@@ -698,8 +698,8 @@ class TemporalGraphDataset:
           
             temporal_node2vec = TemporalNode2Vec(
             dimensions=self.embedding_dim,
-            walk_length=80,
-            num_walks=10,
+            walk_length=25,
+            num_walks=75,
             p=1.0,
             q=1.0,
             workers=1,

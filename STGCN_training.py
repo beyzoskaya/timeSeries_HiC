@@ -131,7 +131,7 @@ def train_stgcn(dataset,val_ratio=0.2):
 
     #model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
     gene_connections = compute_gene_connections(dataset)
-    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.two_blocks, args.n_vertex, gene_connections)
+    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.two_blocks_64_dim_embedding, args.n_vertex, gene_connections)
     #model =STGCNChebGraphConvWithTemporalAttention(args, args.blocks, args.n_vertex, gene_connections)
     model = model.float() # convert model to float otherwise I am getting type error
 
@@ -1029,7 +1029,7 @@ class Args:
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
         csv_file='/Users/beyzakaya/Desktop/timeSeries_HiC/mapped/mRNA/enhanced_interactions_synthetic_simple_mRNA.csv',
-        embedding_dim=32,
+        embedding_dim=64,
         seq_len=3,
         pred_len=1
     )
