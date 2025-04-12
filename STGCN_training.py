@@ -131,7 +131,7 @@ def train_stgcn(dataset,val_ratio=0.2):
 
     #model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
     gene_connections = compute_gene_connections(dataset)
-    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.two_blocks_64_dim_embedding, args.n_vertex, gene_connections)
+    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.two_blocks, args.n_vertex, gene_connections)
     #model =STGCNChebGraphConvWithTemporalAttention(args, args.blocks, args.n_vertex, gene_connections)
     model = model.float() # convert model to float otherwise I am getting type error
 
@@ -948,6 +948,10 @@ def analyze_temporal_patterns(dataset, predictions, targets):
 def analyze_problematic_genes(dataset, problematic_genes):
     gene_stats = {}
     
+    # Initialize group-wide trackers
+    group_hic_weights = []
+    group_expression = []
+    
     for gene in problematic_genes:
         gene_idx = dataset.node_map.get(gene)
         if gene_idx is None:
@@ -961,23 +965,42 @@ def analyze_problematic_genes(dataset, problematic_genes):
             'expression_variance': []
         }
         
+        # Collect HiC data
         for _, row in dataset.df.iterrows():
             if row['Gene1_clean'] == gene or row['Gene2_clean'] == gene:
                 stats['connections'] += 1
                 stats['hic_weights'].append(row['HiC_Interaction'])
                 stats['compartment_matches'] += 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
                 stats['tad_distances'].append(abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance']))
-
+        
+        # Collect expression data
+        expr_values = []
         for t in dataset.time_points:
             expr = dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{t}'].values
             if len(expr) > 0:
-                stats['expression_variance'].append(expr[0])
+                expr_values.append(expr[0])
+        stats['expression_variance'] = expr_values
         
+        # Calculate per-gene averages
         stats['avg_hic_weight'] = np.mean(stats['hic_weights']) if stats['hic_weights'] else 0
-        stats['expression_std'] = np.std(stats['expression_variance']) if stats['expression_variance'] else 0
+        stats['expression_mean'] = np.mean(expr_values) if expr_values else 0
+        stats['expression_std'] = np.std(expr_values) if expr_values else 0
+        
+        # Append to group-wide trackers
+        group_hic_weights.extend(stats['hic_weights'])
+        group_expression.extend(expr_values)
+        
         gene_stats[gene] = stats
     
-    return gene_stats
+    # Calculate group-wide averages
+    overall_stats = {
+        'group_hic_avg': np.mean(group_hic_weights) if group_hic_weights else 0,
+        'group_expr_avg': np.mean(group_expression) if group_expression else 0,
+        'group_expr_std': np.std(group_expression) if group_expression else 0
+    }
+    
+    return gene_stats, overall_stats
+
 
 class Args:
     def __init__(self):
@@ -1029,7 +1052,7 @@ class Args:
 if __name__ == "__main__":
     dataset = TemporalGraphDataset(
         csv_file='/Users/beyzakaya/Desktop/timeSeries_HiC/mapped/mRNA/enhanced_interactions_synthetic_simple_mRNA.csv',
-        embedding_dim=64,
+        embedding_dim=32,
         seq_len=3,
         pred_len=1
     )
@@ -1060,28 +1083,18 @@ if __name__ == "__main__":
     gene_stats = analyze_gene_characteristics(dataset, predictions, targets)
     temporal_stats = analyze_temporal_patterns(dataset, predictions, targets)
 
-    problematic_genes = ['THTPA', 'AMACR', 'MMP7', 'ABCG2', 'HPGDS', 'VIM']
-    gene_stats = analyze_problematic_genes(dataset, problematic_genes)
+    problematic_genes = ['MCPT4', 'THTPA', 'PRIM2', 'GUCY1A2', 'MMP-3']
+    gene_stats, overall_stats = analyze_problematic_genes(dataset, problematic_genes)
 
-    for gene, stats in gene_stats.items():
-        print(f"\nGene: {gene}")
-        print("-" * 30)
-        print(f"Number of connections: {stats['connections']}")
-        print(f"Average HiC interaction weight: {stats['avg_hic_weight']:.4f}")
-        print(f"Compartment matches: {stats['compartment_matches']}")
-        print(f"Expression standard deviation: {stats['expression_std']:.4f}")
-        
-        if stats['tad_distances']:
-            print(f"Average TAD boundary distance: {np.mean(stats['tad_distances']):.4f}")
-        
-        print("\nHiC Interactions:")
-        if stats['hic_weights']:
-            print(f"Min HiC weight: {min(stats['hic_weights']):.4f}")
-            print(f"Max HiC weight: {max(stats['hic_weights']):.4f}")
-            print(f"Mean HiC weight: {np.mean(stats['hic_weights']):.4f}")
-        
-        if stats['expression_variance']:
-            print("\nExpression Statistics:")
-            print(f"Min expression: {min(stats['expression_variance']):.4f}")
-            print(f"Max expression: {max(stats['expression_variance']):.4f}")
-            print(f"Expression range: {max(stats['expression_variance']) - min(stats['expression_variance']):.4f}")
+    print(f"Worst correlated genes:")
+    print(f"Group HiC Average: {overall_stats['group_hic_avg']:.4f}")
+    print(f"Group Expression: {overall_stats['group_expr_avg']:.4f} ± {overall_stats['group_expr_std']:.4f}")
+    
+    print("*****************************************************************************************")
+
+    best_correlated_genes = ['VIM', 'integrin subunit alpha 8', 'hprt', 'ADAMTSL2', 'TTF-1']
+    gene_stats_best_correlated, overall_stats_best_correlated = analyze_problematic_genes(dataset, best_correlated_genes)
+
+    print(f"Best correlated genes:")
+    print(f"Group HiC Average: {overall_stats_best_correlated['group_hic_avg']:.4f}")
+    print(f"Group Expression: {overall_stats_best_correlated['group_expr_avg']:.4f} ± {overall_stats['group_expr_std']:.4f}")

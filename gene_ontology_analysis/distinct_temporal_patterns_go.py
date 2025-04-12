@@ -14,6 +14,20 @@ ENRICHR_URL = "https://maayanlab.cloud/Enrichr"
 def clean_gene_name(gene_name):
     if pd.isna(gene_name):
         return gene_name
+    if gene_name == "integrin subunit alpha 8":
+        return "ITGA8"
+    if gene_name == "MCPt4":
+        return "Mcpt4"
+    if gene_name == "THTPA":
+        return "Thnsl2"
+    if gene_name == "PRIM2":
+        return "Prim2"
+    if gene_name == "MMP-3":
+        return "Mmp3"
+    if gene_name == "hprt":
+        return "HPRT1"
+    if gene_name == "TTF-1":
+        return "Nkx2-1 "
     return gene_name.split('(')[0].strip()
 
 def extract_expression_values(df, time_points):
@@ -109,7 +123,7 @@ def analyze_clusters_with_go(clusters, databases=["GO_Biological_Process_2021", 
     
     results = {}
 
-    excel_filename = "temporal_go_analysis.xlsx"
+    excel_filename = "temporal_go_analysis_missing_gene_names_updated.xlsx"
     excel_file_pth = f"GO_results_temporal_patterns/{excel_filename}"
     with pd.ExcelWriter(excel_file_pth) as writer:
         for cluster_id, gene_list in clusters.items():
@@ -157,7 +171,7 @@ def run_temporal_clustering_and_go_analysis(expression_data_csv, num_clusters=3,
 
 if __name__ == "__main__":
 
-    csv_file = "/Users/beyzakaya/Desktop/temporal gene/mapped/enhanced_interactions_synthetic_simple.csv"
+    csv_file = "/Users/beyzakaya/Desktop/timeSeries_HiC/mapped/mRNA/enhanced_interactions_synthetic_simple_mRNA.csv"
     df = pd.read_csv(csv_file)
     df['Gene1_clean'] = df['Gene1'].apply(clean_gene_name)
     df['Gene2_clean'] = df['Gene2'].apply(clean_gene_name)

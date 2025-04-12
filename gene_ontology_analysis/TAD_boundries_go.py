@@ -137,8 +137,8 @@ def analyze_tad_boundaries_with_go(strong_boundaries, weak_boundaries, databases
                 go_results = get_enrichr_results(genes, db)
                 
                 if not go_results.empty:
-                    #file_name = f"GO_results_TAD/{boundary_type}_{db}.csv"
-                    #go_results.to_csv(file_name, index=False)
+                    file_name = f"GO_results_TAD/{boundary_type}_{db}.csv"
+                    go_results.to_csv(file_name, index=False)
                     print(f"Saved GO results for {boundary_type} - {db}")
                 
                 boundary_results[db] = go_results
@@ -152,7 +152,7 @@ def analyze_tad_boundaries_with_go(strong_boundaries, weak_boundaries, databases
     return results
 
 def save_go_results_to_excel(results):
-    with pd.ExcelWriter('GO_results_TAD/TAD_boundries_go_analyzes.xlsx') as writer:
+    with pd.ExcelWriter('GO_results_TAD/TAD_boundries_go_analyzes_missing_genes_updated_names.xlsx') as writer:
         for boundary_type, db_results in results.items():
             for db, df in db_results.items():
                 if not df.empty:
@@ -307,7 +307,7 @@ def plot_tad_go_heatmap(excel_file, tad_sheet_name, top_n=10):
         print(f"Missing necessary columns in {tad_sheet_name} for heatmap plotting.")
 
 if __name__ == "__main__":
-    csv_file = "/Users/beyzakaya/Desktop/temporal gene/mapped/enhanced_interactions_synthetic_simple.csv"
+    csv_file = "/Users/beyzakaya/Desktop/timeSeries_HiC/mapped/mRNA/enhanced_interactions_synthetic_simple_mRNA.csv"
 
     df = pd.read_csv(csv_file)
     df['Gene1_clean'] = df['Gene1'].apply(clean_gene_name)
@@ -318,8 +318,8 @@ if __name__ == "__main__":
     print(f"Strong Boundary Genes: {strong_boundaries}")
     print(f"Weak Boundary Genes: {weak_boundaries}")
     
-    #databases = ["GO_Biological_Process_2021", "GO_Molecular_Function_2021"]
-    #go_results = analyze_tad_boundaries_with_go(strong_boundaries, weak_boundaries, databases)
+    databases = ["GO_Biological_Process_2021", "GO_Molecular_Function_2021"]
+    go_results = analyze_tad_boundaries_with_go(strong_boundaries, weak_boundaries, databases)
 
     for chrom in df['Gene1_Chromosome'].unique():
         chrom_df = df[df['Gene1_Chromosome'] == chrom]
@@ -329,17 +329,17 @@ if __name__ == "__main__":
         chrom_df = df[df['Gene1_Chromosome'] == chrom]
         #plot_combined_insulation_scores(chrom_df, strong_boundaries, weak_boundaries, chrom)
 
-    excel_file = "/Users/beyzakaya/Desktop/temporal gene/gene_ontology_analysis/GO_results_TAD/TAD_boundries_go_analyzes.xlsx" 
-    sheet_name_strong_boundaries = 'Strong_Boundaries_GO_Molecul'
-    sheet_name_weak_boundaries = 'Weak_Boundaries_GO_Molecul'
-    compartment_name = "Compartment_B" # does not matter in the case of TAD boundary go analyzes/I tried to plot with different compartments 
+    #excel_file = "/Users/beyzakaya/Desktop/temporal gene/gene_ontology_analysis/GO_results_TAD/TAD_boundries_go_analyzes.xlsx" 
+    #sheet_name_strong_boundaries = 'Strong_Boundaries_GO_Molecul'
+    #sheet_name_weak_boundaries = 'Weak_Boundaries_GO_Molecul'
+    #compartment_name = "Compartment_B" # does not matter in the case of TAD boundary go analyzes/I tried to plot with different compartments 
     #plot_go_bubble(excel_file, sheet_name_weak_boundaries, compartment_name)
 
-    compare_tad_go_results(excel_file, sheet_name_strong_boundaries, top_n=10)
-    plot_tad_go_heatmap(excel_file, sheet_name_strong_boundaries, top_n=10)
+    #compare_tad_go_results(excel_file, sheet_name_strong_boundaries, top_n=10)
+    #plot_tad_go_heatmap(excel_file, sheet_name_strong_boundaries, top_n=10)
 
-    compare_tad_go_results(excel_file, sheet_name_weak_boundaries, top_n=10)
-    plot_tad_go_heatmap(excel_file, sheet_name_weak_boundaries, top_n=10)
+    #compare_tad_go_results(excel_file, sheet_name_weak_boundaries, top_n=10)
+    #plot_tad_go_heatmap(excel_file, sheet_name_weak_boundaries, top_n=10)
 
     print("TAD Boundary GO Enrichment Analysis Completed.")
    

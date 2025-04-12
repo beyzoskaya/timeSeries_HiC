@@ -85,7 +85,7 @@ def analyze_tissue_specificity(gene_list):
     check_gene_list(gene_list)
     
     os.makedirs("GO_results_tissue", exist_ok=True)
-    output_file = "GO_results_tissue/tissue_enrichment_results.xlsx"
+    output_file = "GO_results_tissue/tissue_enrichment_results_missing_genes_updated_names.xlsx"
     
     try:
         with pd.ExcelWriter(output_file) as writer:
@@ -156,7 +156,7 @@ def analyze_tissue_specificity_with_plottings(gene_list):
     check_gene_list(gene_list)
     
     os.makedirs("GO_results_tissue", exist_ok=True)
-    output_file = "GO_results_tissue/tissue_enrichment_results.xlsx"
+    output_file = "GO_results_tissue/tissue_enrichment_results_missing_genes_updated_names.xlsx"
     
     try:
         with pd.ExcelWriter(output_file) as writer:
@@ -190,14 +190,14 @@ def analyze_tissue_specificity_with_plottings(gene_list):
 
 if __name__ == "__main__":
     try:
-        csv_file = "/Users/beyzakaya/Desktop/temporal gene/mapped/enhanced_interactions_synthetic_simple.csv" 
+        csv_file = "/Users/beyzakaya/Desktop/timeSeries_HiC/mapped/mRNA/enhanced_interactions_synthetic_simple_mRNA.csv" 
         df = pd.read_csv(csv_file)
         gene_list = pd.concat([df['Gene1'], df['Gene2']]).unique().tolist()
 
-        #df['Gene1_clean'] = df['Gene1'].apply(clean_gene_name)
-        #df['Gene2_clean'] = df['Gene2'].apply(clean_gene_name)
+        df['Gene1_clean'] = df['Gene1'].apply(clean_gene_name)
+        df['Gene2_clean'] = df['Gene2'].apply(clean_gene_name)
         
-        gene_list = pd.concat([df['Gene1'], df['Gene2']]).unique().tolist()
+        gene_list = pd.concat([df['Gene1_clean'], df['Gene2_clean']]).unique().tolist()
         
         logger.info(f"Analyzing {len(gene_list)} genes...")
         

@@ -57,7 +57,7 @@ def analyze_compartments_with_go(df, databases=["GO_Biological_Process_2021", "G
 
     results = {}
 
-    excel_filename = "compartment_go_analysis.xlsx"
+    excel_filename = "compartment_go_analysis_missing_genes_updated_names.xlsx"
     excel_file_pth = f"GO_results_compartments/{excel_filename}"
     with pd.ExcelWriter(excel_file_pth) as writer:
         print(f"\nRunning GO analysis for Compartment A ({len(compartment_A_genes)} genes)...")
@@ -222,12 +222,12 @@ def plot_go_bubble(df, compartment_name):
 
 if __name__ == "__main__":
 
-    #csv_file = "/Users/beyzakaya/Desktop/temporal gene/mapped/enhanced_interactions_synthetic_simple.csv"
-    #run_compartment_go_analysis(csv_file)
+    csv_file = "/Users/beyzakaya/Desktop/timeSeries_HiC/mapped/mRNA/enhanced_interactions_synthetic_simple_mRNA.csv"
+    run_compartment_go_analysis(csv_file)
 
-    file_path = '/Users/beyzakaya/Desktop/temporal gene/gene_ontology_analysis/GO_results_compartments/compartment_go_analysis.xlsx'
-    df_A = read_go_data(file_path, 'Compartment_A_Molecular')
-    df_B = read_go_data(file_path, 'Compartment_B_Molecular')
+    #file_path = '/Users/beyzakaya/Desktop/temporal gene/gene_ontology_analysis/GO_results_compartments/compartment_go_analysis.xlsx'
+    #df_A = read_go_data(file_path, 'Compartment_A_Molecular')
+    #df_B = read_go_data(file_path, 'Compartment_B_Molecular')
     #plot_go_terms(df_A, "Compartment A")
     #plot_go_terms(df_B, "Compartment B")
     #compare_compartments(df_A, df_B)
