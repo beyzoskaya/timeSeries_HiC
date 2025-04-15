@@ -23,7 +23,10 @@ from create_graph_and_embeddings_STGCN import *
 from STGCN_losses import temporal_loss_for_projected_model, enhanced_temporal_loss, gene_specific_loss
 from evaluation import *
 from clustering_by_expr_levels import analyze_expression_levels_kmeans
-    
+from sklearn.manifold import TSNE
+from sklearn.metrics.pairwise import cosine_similarity
+import seaborn as sns
+
 def process_batch(seq, label):
     """Process batch data for training."""
     # Input: Use full embeddings
@@ -1056,6 +1059,40 @@ if __name__ == "__main__":
         seq_len=3,
         pred_len=1
     )
+
+    genes_of_interest = ['VIM', 'Shisa3', 'EGFR' , 'Hist1h2ab']
+    
+    embeddings = []
+    for t in dataset.time_points:
+        emb = dataset.node_features[t].numpy()
+        idxs = [dataset.node_map[g] for g in genes_of_interest]
+        embeddings.append(emb[idxs])
+    embeddings = np.stack(embeddings)  # shape: [num_time_points, num_genes, embedding_dim]
+    embeddings_flat = embeddings.reshape(-1, embeddings.shape[-1])
+
+    tsne = TSNE(n_components=2, random_state=42)
+    embeddings_2d = tsne.fit_transform(embeddings_flat)
+    embeddings_2d = embeddings_2d.reshape(len(dataset.time_points), len(genes_of_interest), 2)
+
+    plt.figure(figsize=(10, 8))
+    for i, gene in enumerate(genes_of_interest):
+        plt.plot(embeddings_2d[:, i, 0], embeddings_2d[:, i, 1], marker='o', label=gene)
+        for t_idx, t in enumerate(dataset.time_points):
+            plt.text(embeddings_2d[t_idx, i, 0], embeddings_2d[t_idx, i, 1], f"{t}", fontsize=8)
+    plt.title("Temporal Trajectories of Node2Vec Embeddings")
+    plt.xlabel("t-SNE 1")
+    plt.ylabel("t-SNE 2")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    #embeddings = dataset.node_features[dataset.time_points[-1]].numpy()
+    #sim_matrix = cosine_similarity(embeddings)
+    #sns.heatmap(sim_matrix, cmap='viridis')
+    #plt.title(f"Node2Vec Embedding Similarity at Time {dataset.time_points[-1]}")
+    #plt.xlabel("Gene Index")
+    #plt.ylabel("Gene Index")
+    #plt.show()
 
     model, val_sequences, val_labels, train_losses, val_losses, train_sequences, train_labels = train_stgcn(dataset, val_ratio=0.2)
     

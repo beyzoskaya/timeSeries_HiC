@@ -230,7 +230,7 @@ class TemporalGraphDataset:
         # Get edge information
         self.edge_index, self.edge_attr = self.get_edge_index_and_attr()
         print(f"Graph structure created with {len(self.edge_attr)} edges")
-    
+
     def create_base_graph(self):
         """Create a single base graph using structural features"""
         G = nx.Graph()
@@ -1045,6 +1045,147 @@ class TemporalGraphDataset:
         print(f"Validation sequences: {len(val_sequences)} ({len(val_sequences)/n_samples:.1%})")
         
         return train_sequences, train_labels, val_sequences, val_labels, train_idx, val_idx
-        
+    
+def visualize_gene_network(dataset, time_point, top_n_genes=None, min_weight=0.1, 
+                           layout='kamada_kawai', figsize=(12, 10), save_path=None):
+    graph_data = dataset.get_pyg_graph(time_point)
+    edge_index = graph_data.edge_index.numpy().T
+    edge_weights = graph_data.edge_attr.numpy().flatten()
+    
+    # Create full graph
+    G = nx.Graph()
+    gene_names = list(dataset.node_map.keys())
+    
+    # Add all nodes
+    for idx, gene in enumerate(gene_names):
+        G.add_node(idx, gene=gene)
+    
+    # Add edges with weights
+    for (src, dst), weight in zip(edge_index, edge_weights):
+        if src < dst:  # avoid duplicate edges
+            G.add_edge(src, dst, weight=float(weight))
+    
+    # Filter by edge weight
+    if min_weight > 0:
+        G = nx.Graph([(u, v, d) for u, v, d in G.edges(data=True) 
+                      if d['weight'] >= min_weight])
+    
+    # Select top connected genes if specified
+    if top_n_genes is not None:
+        degree = dict(nx.degree(G, weight='weight'))
+        top_genes = sorted(degree.items(), key=lambda x: x[1], reverse=True)[:top_n_genes]
+        top_indices = [idx for idx, _ in top_genes]
+        G = G.subgraph(top_indices)
+    
+    # Create plot
+    plt.figure(figsize=figsize)
+    
+    # Choose layout
+    if layout == 'spring':
+        pos = nx.spring_layout(G, k=0.5, seed=42)
+    elif layout == 'kamada_kawai':
+        pos = nx.kamada_kawai_layout(G)
+    elif layout == 'circular':
+        pos = nx.circular_layout(G)
+    else:
+        pos = nx.fruchterman_reingold_layout(G, k=0.5, seed=42)
+    
+    # Get edge weights for width and color
+    weights = [G[u][v]['weight'] for u, v in G.edges()]
+    if not weights:
+        print("No edges to display with current settings")
+        return
+    
+    # Scale node sizes by degree centrality
+    centrality = nx.degree_centrality(G)
+    node_sizes = [3000 * centrality[n] + 500 for n in G.nodes()]
+    
+    # Draw nodes
+    nx.draw_networkx_nodes(G, pos, 
+                          node_size=node_sizes,
+                          node_color='lightblue', 
+                          edgecolors='black',
+                          linewidths=1.5,
+                          alpha=0.8)
+    
+    # Draw edges with scaled width and color
+    edge_widths = [1 + 8 * (w/max(weights)) for w in weights]
+    nx.draw_networkx_edges(G, pos, 
+                          width=edge_widths,
+                          edge_color=weights,
+                          edge_cmap=plt.cm.YlOrRd,
+                          alpha=0.7)
+    
+    # Draw node labels with no overlaps
+    label_pos = {n: (p[0], p[1] + 0.02) for n, p in pos.items()}
+    nx.draw_networkx_labels(G, label_pos, 
+                          labels={n: gene_names[n] for n in G.nodes()},
+                          font_size=10,
+                          font_weight='bold')
+    
+    # Add colorbar
+    sm = plt.cm.ScalarMappable(cmap=plt.cm.YlOrRd, norm=plt.Normalize(vmin=min(weights), vmax=max(weights)))
+    sm.set_array([])
+    plt.colorbar(sm, label='Interaction Strength', shrink=0.8)
+    
+    plt.title(f"Gene Interaction Network at Time {time_point}", fontsize=14)
+    plt.axis('off')
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Figure saved to {save_path}")
+    else:
+        plt.show()
+    
+    return G
 
- 
+def visualize_gene_subnetwork_with_weights(dataset, time_point, gene_list, top_edges=15, save_path=None):
+    if time_point not in dataset.time_points:
+        raise ValueError(f"Invalid time point. Available: {dataset.time_points}")
+
+    # Get graph data
+    graph_data = dataset.get_pyg_graph(time_point)
+    edge_index = graph_data.edge_index.numpy().T
+    edge_weights = graph_data.edge_attr.numpy().flatten()
+
+    # Map gene names to indices
+    selected_indices = [dataset.node_map[gene] for gene in gene_list]
+    idx_to_gene = {idx: gene for gene, idx in dataset.node_map.items()}
+
+    # Build subgraph
+    G = nx.Graph()
+    for idx in selected_indices:
+        G.add_node(idx, label=idx_to_gene[idx])
+
+    # Add relevant edges
+    edge_list = []
+    for (src, dst), weight in zip(edge_index, edge_weights):
+        if src in selected_indices and dst in selected_indices and src < dst:
+            edge_list.append((src, dst, weight))
+    edge_list.sort(key=lambda x: x[2], reverse=True)
+    for src, dst, weight in edge_list[:top_edges]:
+        G.add_edge(src, dst, weight=weight)
+
+    # Node labels: gene names
+    node_labels = {idx: idx_to_gene[idx] for idx in G.nodes()}
+
+    # Edge labels: real weights
+    edge_labels = {(u, v): f"{G[u][v]['weight']:.2f}" for u, v in G.edges()}
+
+    # Draw
+    plt.figure(figsize=(10, 7))
+    pos = nx.spring_layout(G, seed=42)
+    nx.draw_networkx_nodes(G, pos, node_size=1200, node_color='white', edgecolors='black', linewidths=2)
+    nx.draw_networkx_edges(G, pos, width=[2 + 4*G[u][v]['weight'] for u, v in G.edges()], edge_color='black')
+    nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=16, font_weight='bold')
+    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=14, font_color='darkred', bbox=dict(facecolor='white', edgecolor='none', alpha=0.8))
+    plt.title(f"Gene Subnetwork at Time {time_point}", fontsize=16)
+    plt.axis('off')
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300)
+        print(f"Saved to {save_path}")
+    else:
+        plt.show()
+
