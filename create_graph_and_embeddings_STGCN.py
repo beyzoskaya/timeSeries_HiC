@@ -222,7 +222,7 @@ class TemporalGraphDataset:
         # Create base graph and features
         self.base_graph = self.create_base_graph()
         print("Base graph created")
-        #self.node_features = self.create_temporal_node_features_several_graphs_created_clustering() # try with several graphs for time series consistency
+        #self.node_features = self.create_temporal_node_features_several_graphs_created() # try with several graphs for time series consistency
         self.node_features, self.temporal_edge_indices, self.temporal_edge_attrs = \
         self.create_temporal_node_features_several_graphs_created_clustering_temporalNode2vec()
         print("Temporal node features created")
@@ -310,11 +310,12 @@ class TemporalGraphDataset:
                 ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
                 
                 # Combine weights
-                weight = (hic_weight * 0.25 +
+                weight_d = (hic_weight * 0.25 +
                         compartment_sim * 0.1 +
                         tad_sim * 0.1 +
                         ins_sim * 0.1 +
                         expr_sim * 0.45)
+                weight = expr_sim
                 
                 G.add_edge(gene1, gene2, weight=weight)
             
@@ -715,6 +716,14 @@ class TemporalGraphDataset:
             min_count=1,
             batch_words=4
         )
+
+        #for time_point, graph in temporal_graphs.items():
+        #    print(f"Plotting graph for time point {time_point}")
+        #    visualize_enhanced_gene_graph_several_times(
+        #        base_graph=graph,
+        #        gene_names=self.node_map,
+        #        time_point=time_point
+        #    )
             
         return temporal_features, temporal_edge_indices, temporal_edge_attrs
     
@@ -1046,146 +1055,188 @@ class TemporalGraphDataset:
         
         return train_sequences, train_labels, val_sequences, val_labels, train_idx, val_idx
     
-def visualize_gene_network(dataset, time_point, top_n_genes=None, min_weight=0.1, 
-                           layout='kamada_kawai', figsize=(12, 10), save_path=None):
-    graph_data = dataset.get_pyg_graph(time_point)
-    edge_index = graph_data.edge_index.numpy().T
-    edge_weights = graph_data.edge_attr.numpy().flatten()
+
+def visualize_enhanced_gene_graph_several_times(base_graph, gene_names, time_point):
+    plt.figure(figsize=(18, 16))
+
+    pos = nx.spring_layout(base_graph, seed=42, k=2)
+
+    node_labels = {i: gene for gene, i in gene_names.items() if i in base_graph.nodes}
+    nx.draw_networkx_nodes(base_graph, pos, node_size=900, node_color='skyblue', alpha=0.6)
+
+    edge_weights = [base_graph[u][v]['weight'] for u, v in base_graph.edges()]
+    edge_labels = {(u, v): f"{base_graph[u][v]['weight']:.2f}" for u, v in base_graph.edges()}
     
-    # Create full graph
-    G = nx.Graph()
-    gene_names = list(dataset.node_map.keys())
-    
-    # Add all nodes
-    for idx, gene in enumerate(gene_names):
-        G.add_node(idx, gene=gene)
-    
-    # Add edges with weights
-    for (src, dst), weight in zip(edge_index, edge_weights):
-        if src < dst:  # avoid duplicate edges
-            G.add_edge(src, dst, weight=float(weight))
-    
-    # Filter by edge weight
-    if min_weight > 0:
-        G = nx.Graph([(u, v, d) for u, v, d in G.edges(data=True) 
-                      if d['weight'] >= min_weight])
-    
-    # Select top connected genes if specified
-    if top_n_genes is not None:
-        degree = dict(nx.degree(G, weight='weight'))
-        top_genes = sorted(degree.items(), key=lambda x: x[1], reverse=True)[:top_n_genes]
-        top_indices = [idx for idx, _ in top_genes]
-        G = G.subgraph(top_indices)
-    
-    # Create plot
-    plt.figure(figsize=figsize)
-    
-    # Choose layout
-    if layout == 'spring':
-        pos = nx.spring_layout(G, k=0.5, seed=42)
-    elif layout == 'kamada_kawai':
-        pos = nx.kamada_kawai_layout(G)
-    elif layout == 'circular':
-        pos = nx.circular_layout(G)
-    else:
-        pos = nx.fruchterman_reingold_layout(G, k=0.5, seed=42)
-    
-    # Get edge weights for width and color
-    weights = [G[u][v]['weight'] for u, v in G.edges()]
-    if not weights:
-        print("No edges to display with current settings")
-        return
-    
-    # Scale node sizes by degree centrality
-    centrality = nx.degree_centrality(G)
-    node_sizes = [3000 * centrality[n] + 500 for n in G.nodes()]
-    
-    # Draw nodes
-    nx.draw_networkx_nodes(G, pos, 
-                          node_size=node_sizes,
-                          node_color='lightblue', 
-                          edgecolors='black',
-                          linewidths=1.5,
-                          alpha=0.8)
-    
-    # Draw edges with scaled width and color
-    edge_widths = [1 + 8 * (w/max(weights)) for w in weights]
-    nx.draw_networkx_edges(G, pos, 
-                          width=edge_widths,
-                          edge_color=weights,
-                          edge_cmap=plt.cm.YlOrRd,
-                          alpha=0.7)
-    
-    # Draw node labels with no overlaps
-    label_pos = {n: (p[0], p[1] + 0.02) for n, p in pos.items()}
-    nx.draw_networkx_labels(G, label_pos, 
-                          labels={n: gene_names[n] for n in G.nodes()},
-                          font_size=10,
-                          font_weight='bold')
-    
-    # Add colorbar
-    sm = plt.cm.ScalarMappable(cmap=plt.cm.YlOrRd, norm=plt.Normalize(vmin=min(weights), vmax=max(weights)))
-    sm.set_array([])
-    plt.colorbar(sm, label='Interaction Strength', shrink=0.8)
-    
-    plt.title(f"Gene Interaction Network at Time {time_point}", fontsize=14)
+    nx.draw_networkx_edges(base_graph, pos, width=2.0, alpha=0.6, edge_color=edge_weights, edge_cmap=plt.cm.Blues_r)
+    nx.draw_networkx_labels(base_graph, pos, labels=node_labels, font_size=12, font_weight='bold')
+    nx.draw_networkx_edge_labels(base_graph, pos, edge_labels=edge_labels, font_size=14, font_color='black')
+
     plt.axis('off')
     plt.tight_layout()
+    clean_time = str(time_point).replace('.', '_')
+    plt.savefig(f"plottings_STGCN/graph_time_{clean_time}.pdf", dpi=900)
+    plt.close()
+
+
+
+class StaticNode2VecGraphDataset:
+    def __init__(self, csv_file, embedding_dim=32, seq_len=4, pred_len=1):
+        self.seq_len = seq_len
+        self.pred_len = pred_len
+        self.embedding_dim = embedding_dim
+        
+        self.df = pd.read_csv(csv_file)
+        self.df['Gene1_clean'] = self.df['Gene1']
+        self.df['Gene2_clean'] = self.df['Gene2']
+        self.df = self.df.loc[:, ~self.df.columns.str.contains('^Unnamed', case=False)]
+
+        unique_genes = pd.concat([self.df['Gene1_clean'], self.df['Gene2_clean']]).unique()
+        self.node_map = {gene: idx for idx, gene in enumerate(unique_genes)}
+        self.num_nodes = len(self.node_map)
+        
+        self.time_cols = [col for col in self.df.columns if 'Time_' in col]
+        self.time_points = sorted(list(set([float(col.split('_')[-1])  
+                                          for col in self.time_cols if 'Gene1' in col])))
+        print(f"Found time points: {self.time_points}")
+        print(f"Len of time points: {len(self.time_points)}")
+        self.time_points = [tp for tp in self.time_points if tp != 154.0]
+        self.df = self.df.loc[:, ~self.df.columns.str.contains('Time_154.0', case=False)]
+        
+        self.base_graph = self.create_base_graph()
+        
+        self.node_features, self.temporal_edge_indices, self.temporal_edge_attrs = \
+            self.create_temporal_node_features_with_node2vec()
+        
+        self.edge_index, self.edge_attr = self.get_edge_index_and_attr()
     
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Figure saved to {save_path}")
-    else:
-        plt.show()
-    
-    return G
+    def create_base_graph(self):
+        """Create a single base graph using structural features"""
+        G = nx.Graph()
+        G.add_nodes_from(self.node_map.keys())
+        
+        for _, row in self.df.iterrows():
+            hic_weight = row['HiC_Interaction']
+            compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
+            tad_dist = abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance'])
+            tad_sim = 1 / (1 + tad_dist)
+            ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
+            
+            # Use only structural features for base graph
+            weight = (hic_weight * 0.4 + 
+                     compartment_sim * 0.2 + 
+                     tad_sim * 0.2 + 
+                     ins_sim * 0.2)
+             
+            G.add_edge(row['Gene1_clean'], row['Gene2_clean'], weight=weight)
+        
+        return G
 
-def visualize_gene_subnetwork_with_weights(dataset, time_point, gene_list, top_edges=15, save_path=None):
-    if time_point not in dataset.time_points:
-        raise ValueError(f"Invalid time point. Available: {dataset.time_points}")
+    def create_temporal_node_features_with_node2vec(self):
+        temporal_node_features = {}
+        temporal_edge_indices = {}
+        temporal_edge_attrs = {}
 
-    # Get graph data
-    graph_data = dataset.get_pyg_graph(time_point)
-    edge_index = graph_data.edge_index.numpy().T
-    edge_weights = graph_data.edge_attr.numpy().flatten()
+        for t in self.time_points:
+            G = nx.Graph()
+            G.add_nodes_from(self.node_map.keys())
+            
+            edge_index = []
+            edge_weights = []
+            
+            for _, row in self.df.iterrows():
+                gene1 = row['Gene1_clean']
+                gene2 = row['Gene2_clean']
+                
+                # Use expression difference as similarity
+                gene1_expr = row.get(f'Gene1_Time_{t}', 0.0)
+                gene2_expr = row.get(f'Gene2_Time_{t}', 0.0)
+                expr_sim = 1 / (1 + abs(gene1_expr - gene2_expr))
+                print(f"Processing genes: {gene1}, {gene2} at time {t} with expr_sim: {expr_sim}")
+                
+                hic_weight = row['HiC_Interaction'] if not pd.isna(row['HiC_Interaction']) else 0
+                compartment_sim = 1 if row['Gene1_Compartment'] == row['Gene2_Compartment'] else 0
+                tad_dist = abs(row['Gene1_TAD_Boundary_Distance'] - row['Gene2_TAD_Boundary_Distance'])
+                tad_sim = 1 / (1 + tad_dist)
+                ins_sim = 1 / (1 + abs(row['Gene1_Insulation_Score'] - row['Gene2_Insulation_Score']))
+                
+                weight = (hic_weight * 0.25 +
+                        compartment_sim * 0.1 +
+                        tad_sim * 0.1 +
+                        ins_sim * 0.1 +
+                        expr_sim * 0.45)
+            
+                
+                G.add_edge(gene1, gene2, weight=weight)
+                
+                i, j = self.node_map[gene1], self.node_map[gene2]
+                edge_index.extend([[i, j], [j, i]])
+                edge_weights.extend([weight, weight])
+            
+            # Node2Vec on this temporal graph
+            node2vec = Node2Vec(
+                G,
+                dimensions=self.embedding_dim,
+                walk_length=25,
+                num_walks=75,
+                p=1.0,
+                q=1.0,
+                workers=1,
+                seed=42
+            )
+            model = node2vec.fit(window=5, min_count=1, batch_words=4)
+            
+            # Extract embeddings and convert to tensor
+            embeddings = []
+            for gene in self.node_map.keys():
+                embeddings.append(model.wv[str(gene)] if str(gene) in model.wv else np.zeros(self.embedding_dim))
+            embeddings = torch.tensor(embeddings, dtype=torch.float32)
+            
+            temporal_node_features[t] = embeddings
+            temporal_edge_indices[t] = torch.tensor(edge_index).t().contiguous()
+            #temporal_edge_attrs[t] = torch.tensor(edge_weights, dtype=torch.float32).unsqueeze(1)
+            temporal_edge_attrs[t] = torch.tensor(edge_weights, dtype=torch.float32)
+        
+        return temporal_node_features, temporal_edge_indices, temporal_edge_attrs
 
-    # Map gene names to indices
-    selected_indices = [dataset.node_map[gene] for gene in gene_list]
-    idx_to_gene = {idx: gene for gene, idx in dataset.node_map.items()}
+    def get_edge_index_and_attr(self):
+        edge_index = []
+        edge_weights = []
+        for u, v, d in self.base_graph.edges(data=True):
+            i, j = self.node_map[u], self.node_map[v]
+            edge_index.extend([[i, j], [j, i]])
+            edge_weights.extend([d['weight'], d['weight']])
+        return (
+            torch.tensor(edge_index).t().contiguous(),
+            torch.tensor(edge_weights, dtype=torch.float32).unsqueeze(1)
+        )
 
-    # Build subgraph
-    G = nx.Graph()
-    for idx in selected_indices:
-        G.add_node(idx, label=idx_to_gene[idx])
+    def get_pyg_graph(self, time_point):
+        return Data(
+            x=self.node_features[time_point],
+            edge_index=self.temporal_edge_indices[time_point],
+            edge_attr=self.temporal_edge_attrs[time_point],
+            num_nodes=self.num_nodes
+        )
 
-    # Add relevant edges
-    edge_list = []
-    for (src, dst), weight in zip(edge_index, edge_weights):
-        if src in selected_indices and dst in selected_indices and src < dst:
-            edge_list.append((src, dst, weight))
-    edge_list.sort(key=lambda x: x[2], reverse=True)
-    for src, dst, weight in edge_list[:top_edges]:
-        G.add_edge(src, dst, weight=weight)
+    def get_temporal_sequences(self):
+        sequences, labels = [], []
+        for i in range(len(self.time_points) - self.seq_len - self.pred_len + 1):
+            input_times = self.time_points[i:i+self.seq_len]
+            target_times = self.time_points[i+self.seq_len:i+self.seq_len+self.pred_len]
+            seq_graphs = [self.get_pyg_graph(t) for t in input_times]
+            label_graphs = [self.get_pyg_graph(t) for t in target_times]
+            sequences.append(seq_graphs)
+            labels.append(label_graphs)
+        return sequences, labels
 
-    # Node labels: gene names
-    node_labels = {idx: idx_to_gene[idx] for idx in G.nodes()}
-
-    # Edge labels: real weights
-    edge_labels = {(u, v): f"{G[u][v]['weight']:.2f}" for u, v in G.edges()}
-
-    # Draw
-    plt.figure(figsize=(10, 7))
-    pos = nx.spring_layout(G, seed=42)
-    nx.draw_networkx_nodes(G, pos, node_size=1200, node_color='white', edgecolors='black', linewidths=2)
-    nx.draw_networkx_edges(G, pos, width=[2 + 4*G[u][v]['weight'] for u, v in G.edges()], edge_color='black')
-    nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=16, font_weight='bold')
-    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=14, font_color='darkred', bbox=dict(facecolor='white', edgecolor='none', alpha=0.8))
-    plt.title(f"Gene Subnetwork at Time {time_point}", fontsize=16)
-    plt.axis('off')
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300)
-        print(f"Saved to {save_path}")
-    else:
-        plt.show()
-
+    def split_sequences(self, sequences, labels):
+        torch.manual_seed(42)
+        n_samples = len(sequences)
+        n_train = int(n_samples * 0.8)
+        indices = torch.randperm(n_samples)
+        train_idx, val_idx = indices[:n_train], indices[n_train:]
+        train_sequences = [sequences[i] for i in train_idx]
+        train_labels = [labels[i] for i in train_idx]
+        val_sequences = [sequences[i] for i in val_idx]
+        val_labels = [labels[i] for i in val_idx]
+        return train_sequences, train_labels, val_sequences, val_labels, train_idx, val_idx

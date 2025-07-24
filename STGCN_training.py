@@ -16,7 +16,7 @@ from model.models import *
 import sys
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 sys.path.append('./STGCN')
-from model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected, STGCNGraphConv, STGCNGraphConvProjected, STGCNChebGraphConvProjectedGeneConnectedAttention, STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM
+from model.models import STGCNChebGraphConv, STGCNChebGraphConvProjected, STGCNGraphConv, STGCNGraphConvProjected, STGCNChebGraphConvProjectedGeneConnectedAttention, STGCNChebGraphConvProjectedBase
 import argparse
 from scipy.spatial.distance import cdist
 from create_graph_and_embeddings_STGCN import *
@@ -58,7 +58,14 @@ def compute_gene_correlations(dataset, model):
     print("Targets Shape gene correl:", targets.shape)
     print("Predictions Shape gene correl:", predictions.shape)
 
-    gene_correlations = np.array([np.corrcoef(predictions[:, i], targets[:, i])[0, 1] for i in range(targets.shape[1])])
+    #gene_correlations = np.array([np.corrcoef(predictions[:, i], targets[:, i])[0, 1] for i in range(targets.shape[1])])
+    predictions_mean = np.mean(predictions, axis=1)
+    print("Reduced predictions shape:", predictions_mean.shape)
+
+    gene_correlations = np.array([
+        np.corrcoef(predictions_mean[:, i], targets[:, i])[0, 1]
+        for i in range(targets.shape[1])
+    ])
     return torch.tensor(gene_correlations, dtype=torch.float32)
 
 def compute_gene_connections(dataset):
@@ -117,7 +124,7 @@ def train_stgcn(dataset,val_ratio=0.2):
     torch.manual_seed(42)
     train_sequences, train_labels, val_sequences, val_labels, train_idx, val_idx = dataset.split_sequences(sequences, labels)
     
-    with open('plottings_STGCN/split_indices.txt', 'w') as f:
+    with open('plottings_STGCNonly/split_indices.txt', 'w') as f:
         f.write("Train Indices:\n")
         f.write(", ".join(map(str, train_idx)) + "\n")
         f.write("\nValidation Indices:\n")
@@ -132,10 +139,9 @@ def train_stgcn(dataset,val_ratio=0.2):
     #print(f"Number of training sequences: {len(sequences)}")
     #print(f"Number of validation sequences: {len(val_sequences)}")
 
-    #model = STGCNChebGraphConvProjected(args, args.blocks, args.n_vertex)
+    #model = STGCNChebGraphConvProjectedBase(args, args.two_blocks, args.n_vertex)
     gene_connections = compute_gene_connections(dataset)
-    model = STGCNChebGraphConvProjectedGeneConnectedAttention(args, args.two_blocks, args.n_vertex, gene_connections)
-    #model =STGCNChebGraphConvWithTemporalAttention(args, args.blocks, args.n_vertex, gene_connections)
+    model = STGCNChebGraphConvPerGene(args, args.blocks, args.n_vertex)
     model = model.float() # convert model to float otherwise I am getting type error
 
     optimizer = optim.Adam(model.parameters(), lr=0.0007, weight_decay=1e-5)
@@ -151,7 +157,7 @@ def train_stgcn(dataset,val_ratio=0.2):
     best_val_loss = float('inf')
     patience = 20
     patience_counter = 0
-    save_dir = 'plottings_STGCN'
+    save_dir = 'plottings_STGCNonly'
     os.makedirs(save_dir, exist_ok=True)
 
     train_losses = []
@@ -339,7 +345,7 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
     best_val_loss = float('inf')
     patience = 20
     patience_counter = 0
-    save_dir = 'plottings_STGCN'
+    save_dir = 'plottings_STGCNonly'
     os.makedirs(save_dir, exist_ok=True)
 
     train_losses = []
@@ -452,7 +458,7 @@ def train_stgcn_high_expr_first(dataset, val_ratio=0.2):
 
     return model, val_sequences, val_labels, train_losses, val_losses, all_train_sequences, all_train_labels
 
-def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCN'):
+def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_dir='plottings_STGCNonly'):
 
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
@@ -468,7 +474,9 @@ def evaluate_model_performance(model, val_sequences, val_labels, dataset, save_d
             
             # Extract only the expression predictions
             output = output[:, :, -1:, :].squeeze().cpu().numpy()  # [nodes] expression values
+            print(f"Output shape: {output.shape}")  # [1, nodes] for each time point
             target = target.squeeze().cpu().numpy()  # [nodes] expression values
+            print(f"Target shape: {target.shape}")  # [nodes] expression values
             
             all_predictions.append(output)
             all_targets.append(target)
@@ -732,7 +740,7 @@ def create_evaluation_plots(predictions, targets, dataset, save_dir):
     # 3. Gene temporal patterns for all genes
     create_gene_temporal_plots(predictions, targets, dataset, save_dir)
 
-def plot_gene_predictions_train_val(model, train_sequences, train_labels, val_sequences, val_labels, dataset, save_dir='plottings_STGCN', genes_per_page=12):
+def plot_gene_predictions_train_val(model, train_sequences, train_labels, val_sequences, val_labels, dataset, save_dir='plottings_STGCNonly', genes_per_page=12):
 
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
@@ -749,10 +757,8 @@ def plot_gene_predictions_train_val(model, train_sequences, train_labels, val_se
         for seq, label in zip(all_sequences, all_labels):
             x, target = process_batch(seq, label)
             output = model(x)
-            
             output = output[:, :, -1:, :].squeeze().cpu().numpy() 
             target = target.squeeze().cpu().numpy()  
-            
             all_predictions.append(output)
             all_targets.append(target)
     
@@ -760,11 +766,10 @@ def plot_gene_predictions_train_val(model, train_sequences, train_labels, val_se
     targets = np.array(all_targets)          # [time_points, nodes]
     
     gene_names = list(dataset.node_map.keys())
-    
     num_pages = (num_genes + genes_per_page - 1) // genes_per_page
 
     for page in range(num_pages):
-        plt.figure(figsize=(20, 15))  
+        plt.figure(figsize=(20, 15))  # Bigger figure for clarity
         
         start_idx = page * genes_per_page
         end_idx = min((page + 1) * genes_per_page, num_genes)
@@ -772,27 +777,27 @@ def plot_gene_predictions_train_val(model, train_sequences, train_labels, val_se
         
         for i, gene_name in enumerate(page_genes):
             gene_idx = start_idx + i
-            
-            rows = (genes_per_page + 1) // 2  
+            rows = (genes_per_page + 1) // 2
             plt.subplot(rows, 2, i + 1) 
         
             train_time_points = range(len(train_labels))
             plt.plot(train_time_points, targets[:len(train_labels), gene_idx], label='Train Actual', color='blue', marker='o')
-            
             plt.plot(train_time_points, predictions[:len(train_labels), gene_idx], label='Train Predicted', color='red', linestyle='--', marker='x')
      
             val_time_points = range(len(train_labels), len(train_labels) + len(val_labels))
             plt.plot(val_time_points, targets[len(train_labels):, gene_idx], label='Val Actual', color='green', marker='o')
-            
             plt.plot(val_time_points, predictions[len(train_labels):, gene_idx], label='Val Predicted', color='orange', linestyle='--', marker='x')
             
-            plt.title(f'Gene: {gene_name}')
-            plt.xlabel('Time Points')
-            plt.ylabel('Expression Value')
-            plt.legend()
+            # Set larger font sizes
+            plt.title(f'Gene: {gene_name}', fontsize=16)
+            plt.xlabel('Time Points', fontsize=14)
+            plt.ylabel('Expression Value', fontsize=14)
+            plt.xticks(fontsize=12)
+            plt.yticks(fontsize=12)
+            plt.legend(loc='center left', bbox_to_anchor=(-0.3, 0.5), fontsize=12, frameon=False)
         
         plt.tight_layout()
-        plt.savefig(f'{save_dir}/gene_predictions_page_{page + 1}.png')
+        plt.savefig(f'{save_dir}/gene_predictions_page_{page + 1}.pdf', dpi=900)
         plt.close()
 
 def get_predictions_and_targets(model, val_sequences, val_labels):
@@ -811,7 +816,9 @@ def get_predictions_and_targets(model, val_sequences, val_labels):
             
             # Convert to numpy and reshape
             pred = output.squeeze().cpu().numpy()  # Should be [52] or [1, 52]
+            print(f"Shape of prediction: {pred.shape}")  # Should be [52] or [1, 52]
             true = target.squeeze().cpu().numpy()  # Should be [52] or [1, 52]
+            print(f"Shape of target: {true.shape}")  # Should be [52] or [1, 52]
             
             if len(pred.shape) == 1:
                 pred = pred.reshape(1, -1)
@@ -892,7 +899,7 @@ def analyze_gene_characteristics(dataset, predictions, targets):
     plt.title('Distribution of Gene Correlations')
     
     plt.tight_layout()
-    plt.savefig('plottings_STGCN/gene_analysis.png')
+    plt.savefig('plottings_STGCNonly/gene_analysis.png')
     plt.close()
     
     print("\nGene Analysis Summary:")
@@ -938,7 +945,7 @@ def analyze_temporal_patterns(dataset, predictions, targets):
     plt.xlabel('Time Point')
     plt.ylabel('Prediction Accuracy')
     plt.title('Prediction Accuracy Over Time')
-    plt.savefig(f'plottings_STGCN/pred_accuracy.png')
+    plt.savefig(f'plottings_STGCNonly/pred_accuracy.png')
 
     print("\nTemporal Analysis:")
     print(f"Best predicted time point: {np.argmax(time_point_accuracy)}")
@@ -1053,15 +1060,31 @@ class Args:
         self.droprate = 0.1
 
 if __name__ == "__main__":
-    dataset = TemporalGraphDataset(
+    dataset = StaticNode2VecGraphDataset(
         csv_file='/Users/beyzakaya/Desktop/timeSeries_HiC/mapped/mRNA/enhanced_interactions_synthetic_simple_mRNA.csv',
         embedding_dim=32,
         seq_len=3,
         pred_len=1
     )
-
-    genes_of_interest = ['VIM', 'Shisa3', 'EGFR' , 'Hist1h2ab']
     
+    #time_point = 16.0
+    #G = dataset.get_pyg_graph(time_point)
+    #embeddings = dataset.node_features[time_point].numpy()
+    #expression = np.array([dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{time_point}'].values[0]
+    #                       if len(dataset.df[dataset.df['Gene1_clean'] == gene][f'Gene1_Time_{time_point}'].values) > 0
+    #                       else 0.0
+    #                       for gene in dataset.node_map.keys()])
+    #gene_names = list(dataset.node_map.keys())
+    #highlight_genes = ['VIM', 'hprt', 'ADAMTSL2', 'TTF-1', 'integrin subunit alpha 8', 'INMT', 'Claudin5', 'ABCD1']
+
+    #plot_pca_node2vec_network(
+    #    G, embeddings, expression, gene_names,
+    #    highlight_genes=highlight_genes,
+    #    title=f"Gene Interaction Network at Time Point {time_point}\nNode2Vec Embeddings with PCA Visualization"
+    #)
+
+    genes_of_interest = ['VIM', 'Shisa3', 'EGFR', 'Hist1h2ab']
+
     embeddings = []
     for t in dataset.time_points:
         emb = dataset.node_features[t].numpy()
@@ -1070,21 +1093,34 @@ if __name__ == "__main__":
     embeddings = np.stack(embeddings)  # shape: [num_time_points, num_genes, embedding_dim]
     embeddings_flat = embeddings.reshape(-1, embeddings.shape[-1])
 
+    # t-SNE
     tsne = TSNE(n_components=2, random_state=42)
     embeddings_2d = tsne.fit_transform(embeddings_flat)
     embeddings_2d = embeddings_2d.reshape(len(dataset.time_points), len(genes_of_interest), 2)
 
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(10, 8)) 
+
     for i, gene in enumerate(genes_of_interest):
         plt.plot(embeddings_2d[:, i, 0], embeddings_2d[:, i, 1], marker='o', label=gene)
         for t_idx, t in enumerate(dataset.time_points):
-            plt.text(embeddings_2d[t_idx, i, 0], embeddings_2d[t_idx, i, 1], f"{t}", fontsize=8)
-    plt.title("Temporal Trajectories of Node2Vec Embeddings")
-    plt.xlabel("t-SNE 1")
-    plt.ylabel("t-SNE 2")
-    plt.legend()
+            plt.text(
+                embeddings_2d[t_idx, i, 0],
+                embeddings_2d[t_idx, i, 1],
+                f"{t}",
+                fontsize=12 
+            )
+
+    plt.title("Temporal Trajectories of Node2Vec Embeddings mRNA", fontsize=18)
+    plt.xlabel("t-SNE 1", fontsize=14)
+    plt.ylabel("t-SNE 2", fontsize=14)
+    plt.xticks(fontsize=12)
+    plt.yticks(fontsize=12)
+    plt.legend(fontsize=12)
     plt.tight_layout()
+
+    plt.savefig("plottings_STGCNonly/gene_embedding_trajectories_mrna.pdf", dpi=900)
     plt.show()
+    
 
     #embeddings = dataset.node_features[dataset.time_points[-1]].numpy()
     #sim_matrix = cosine_similarity(embeddings)
