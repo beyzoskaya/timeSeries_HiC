@@ -5,6 +5,65 @@ from torch_geometric.nn import GATConv
 from model import layers
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 import math
+from torch_geometric_temporal.nn.recurrent import TGCN
+
+class STGCNChebGraphConvPerGene(nn.Module):
+
+    def __init__(self, args, blocks, n_vertex):
+        super(STGCNChebGraphConvPerGene, self).__init__()
+
+        modules = []
+        # Build stacked STConvBlocks
+        for l in range(len(blocks) - 3):
+            modules.append(
+                layers.STConvBlock(
+                    args.Kt,
+                    args.Ks,
+                    n_vertex,
+                    blocks[l][-1],
+                    blocks[l+1],
+                    args.act_func,
+                    args.graph_conv_type,
+                    args.gso,
+                    args.enable_bias,
+                    args.droprate
+                )
+            )
+        self.st_blocks = nn.Sequential(*modules)
+
+        # Compute Ko = output time steps
+        Ko = args.n_his - (len(blocks) - 3) * 2 * (args.Kt - 1)
+        if Ko <= 0:
+            raise ValueError(
+                f"Invalid Ko={Ko}: please adjust args.n_his, args.Kt, or number of blocks to ensure Ko>0"
+            )
+        self.Ko = Ko
+        print(f"Ko (output time steps): {Ko}") # Ko (output time steps): 4
+        print(f"Number of blocks: {len(blocks) - 3}") # Number of blocks: 0
+        print(f"Input channels: {blocks[0][-1]}") # Input channels: 32
+        print(f"Output channels: {blocks[-1][0]}") # Output channels: 48
+
+        # Always keep the temporal dimension: OutputBlock keeps Ko time steps
+        self.output = layers.OutputBlock(
+            Ko,
+            blocks[-3][-1],
+            blocks[-2],
+            blocks[-1][0],
+            n_vertex,
+            args.act_func,
+            args.enable_bias,
+            args.droprate
+        )
+
+    def forward(self, x):
+        """
+        Input shape: (batch, channels, n_his, num_nodes)
+        Output shape: (batch, output_channels, Ko, num_nodes)
+        """
+        print(f"Input Shape: {x.shape}") # [1, 32, 3, 50]
+        x = self.st_blocks(x)
+        x = self.output(x)
+        return x
 
 class STGCNChebGraphConv(nn.Module):
     # STGCNChebGraphConv contains 'TGTND TGTND TNFF' structure
@@ -45,6 +104,7 @@ class STGCNChebGraphConv(nn.Module):
             self.dropout = nn.Dropout(p=args.droprate)
 
     def forward(self, x):
+        print(f"Input Shape: {x.shape}")
         x = self.st_blocks(x)
         if self.Ko > 1:
             x = self.output(x)
@@ -147,7 +207,7 @@ class STGCNChebGraphConvProjected(nn.Module):
         # Project to expression values
         batch_size, features, time_steps, nodes = x.shape
         x = x.permute(0, 2, 3, 1)  # [batch, time_steps, nodes, features]
-        x = self.expression_proj_miRNA(x)  # [batch, time_steps, nodes, 1]
+        x = self.expression_proj(x)  # [batch, time_steps, nodes, 1]
         #print("After Projection Shape:", x.shape)
         x = x.permute(0, 3, 1, 2)  # [batch, 1, time_steps, nodes]
         
@@ -232,6 +292,82 @@ class STGCNChebGraphConvProjectedGeneConnectedAttention(nn.Module):
         x = x.permute(0, 3, 1, 2)
         
         return x
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class STGCNChebGraphConvProjectedBase(nn.Module):
+    def __init__(self, args, blocks, n_vertex):
+        super(STGCNChebGraphConvProjectedBase, self).__init__()
+        
+        modules = []
+        for l in range(len(blocks) - 3):
+            modules.append(
+                layers.STConvBlockTwoSTBlocks(
+                    args.Kt, args.Ks, n_vertex, blocks[l][-1], blocks[l+1],
+                    args.act_func, args.graph_conv_type, args.gso,
+                    args.enable_bias, args.droprate
+                )
+            )
+        self.st_blocks = nn.Sequential(*modules)
+        
+        Ko = args.n_his - (len(blocks) - 3) * 2 * (args.Kt - 1)
+        self.Ko = Ko
+
+        if self.Ko > 1:
+            self.output = layers.OutputBlock(
+                Ko, blocks[-3][-1], blocks[-2], blocks[-1][0],
+                n_vertex, args.act_func, args.enable_bias, args.droprate
+            )
+        elif self.Ko == 0:
+            self.fc1 = nn.Linear(
+                in_features=blocks[-3][-1], out_features=blocks[-2][0],
+                bias=args.enable_bias
+            )
+            self.fc2 = nn.Linear(
+                in_features=blocks[-2][0], out_features=blocks[-1][0],
+                bias=args.enable_bias
+            )
+            self.elu = nn.ELU()
+            self.dropout = nn.Dropout(p=args.droprate)
+        
+        self.expression_proj = nn.Sequential(
+            nn.Linear(blocks[-1][0], 32),
+            nn.LayerNorm(32),
+            nn.ELU(),
+            nn.Dropout(p=0.1),
+            nn.Linear(32, 16),
+            nn.LayerNorm(16),
+            nn.ELU(),
+            nn.Linear(16, 1)
+        )
+        
+    def forward(self, x):
+        x = self.st_blocks(x)
+        
+        if self.Ko > 1:
+            x = self.output(x)
+        elif self.Ko == 0:
+            # original shape: [batch, channels, time, nodes]
+            x = x.permute(0, 2, 3, 1)  # [batch, time, nodes, channels]
+            x = self.fc1(x)
+            x = self.elu(x)
+            x = self.fc2(x)
+            x = x.permute(0, 3, 1, 2)  # back to [batch, channels, time, nodes]
+
+        # reshape before projection
+        # [batch, channels, time, nodes] -> [batch, time, nodes, channels]
+        x = x.permute(0, 2, 3, 1)
+        
+        # directly apply projection without attention
+        x = self.expression_proj(x)
+
+        # back to [batch, channels, time, nodes]
+        x = x.permute(0, 3, 1, 2)
+        
+        return x
+
 
 # This model works best for mRNA predictions with enhanced_temporal_loss
 class STGCNChebGraphConvProjectedGeneConnectedAttentionLSTM(nn.Module):
