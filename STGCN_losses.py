@@ -80,7 +80,8 @@ def enhanced_temporal_loss(output, target, input_sequence, alpha=0.3, beta=0.3, 
     l1_loss = F.l1_loss(output, target)
     
     # expression values from input sequence
-    input_expressions = input_sequence[:, -1, :, :]  # [1, 3, 52]
+    #input_expressions = input_sequence[:, -1, :, :]  # [1, 3, 52]
+    input_expressions = input_sequence[:, :, :, -1] 
     last_input = input_expressions[:, -1:, :]  # [1, 1, 52]
     
     output_reshaped = output.squeeze(1)  # [1, 1, 52]
@@ -96,8 +97,10 @@ def enhanced_temporal_loss(output, target, input_sequence, alpha=0.3, beta=0.3, 
     direction_loss = direction_loss * 0.01
 
     def enhanced_trend_correlation(pred, target, sequence_expr):
-        pred_trend = torch.cat([sequence_expr, pred], dim=1)
-        target_trend = torch.cat([sequence_expr, target], dim=1)
+        #pred_trend = torch.cat([sequence_expr, pred], dim=1)
+        #target_trend = torch.cat([sequence_expr, target], dim=1)
+        pred_trend = torch.cat([sequence_expr, pred], dim=2)  
+        target_trend = torch.cat([sequence_expr, target], dim=2)
 
         def correlation_loss(x, y):
             x_centered = x - x.mean(dim=1, keepdim=True)

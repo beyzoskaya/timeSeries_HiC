@@ -231,6 +231,9 @@ class TemporalGraphDataset:
         self.edge_index, self.edge_attr = self.get_edge_index_and_attr()
         print(f"Graph structure created with {len(self.edge_attr)} edges")
 
+        self.static_edge_index = self.edge_index # added for ASTGCN
+        self.static_edge_attr = self.edge_attr # added for ASTGCN
+
     def create_base_graph(self):
         """Create a single base graph using structural features"""
         G = nx.Graph()
@@ -681,12 +684,14 @@ class TemporalGraphDataset:
                             tad_sim * 0.1 +
                             ins_sim * 0.1 +
                             expr_sim * 0.6) * 2.0
+                    print(f"Processing edge {gene1} - {gene2} at time {t}: weight={weight}")
                 else:
                     weight = (hic_weight * 0.3 +
                             compartment_sim * 0.1 +
                             tad_sim * 0.1 +
                             ins_sim * 0.1 +
                             expr_sim * 0.4) * cluster_sim
+                    print(f"Processing edge {gene1} - {gene2} at time {t}: weight={weight}")
                 
                 G.add_edge(gene1, gene2, weight=weight)
                 i, j = self.node_map[gene1], self.node_map[gene2]
@@ -1055,6 +1060,26 @@ class TemporalGraphDataset:
         
         return train_sequences, train_labels, val_sequences, val_labels, train_idx, val_idx
     
+    def split_sequences_from_idx(self, sequences, labels, train_idx=None, val_idx=None):
+        if train_idx is not None and val_idx is not None:
+            print(f"Using provided train and validation indices.")
+            train_sequences = [sequences[i] for i in train_idx]
+            train_labels = [labels[i] for i in train_idx]
+            val_sequences = [sequences[i] for i in val_idx]
+            val_labels = [labels[i] for i in val_idx]
+            return train_sequences, train_labels, val_sequences, val_labels, train_idx, val_idx
+        else:
+            torch.manual_seed(42)
+            n_samples = len(sequences)
+            n_train = int(n_samples * 0.8)
+            indices = torch.randperm(n_samples)
+            train_idx, val_idx = indices[:n_train], indices[n_train:]
+            train_sequences = [sequences[i] for i in train_idx]
+            train_labels = [labels[i] for i in train_idx]
+            val_sequences = [sequences[i] for i in val_idx]
+            val_labels = [labels[i] for i in val_idx]
+            return train_sequences, train_labels, val_sequences, val_labels, train_idx, val_idx
+    
 
 def visualize_enhanced_gene_graph_several_times(base_graph, gene_names, time_point):
     plt.figure(figsize=(18, 16))
@@ -1080,7 +1105,7 @@ def visualize_enhanced_gene_graph_several_times(base_graph, gene_names, time_poi
 
 
 class StaticNode2VecGraphDataset:
-    def __init__(self, csv_file, embedding_dim=32, seq_len=4, pred_len=1):
+    def __init__(self, csv_file, embedding_dim=64, seq_len=4, pred_len=1):
         self.seq_len = seq_len
         self.pred_len = pred_len
         self.embedding_dim = embedding_dim
