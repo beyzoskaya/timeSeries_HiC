@@ -1,0 +1,51 @@
+STGCN Model Performance Summary:
+
+Overall Metrics:
+MSE: 0.3238
+RMSE: 0.5690
+MAE: 0.4388
+R2_Score: 0.3865
+Pearson_Correlation: 0.6609
+
+Gene Performance:
+Mean Gene Correlation: 0.5108
+Mean Spearman Correlation: 0.5092
+Best Performing Genes Pearson: INMT, HPGDS, ABCG2, AMACR, MGAT4A
+Best Performing Genes Spearman: ABCA3, ABCD1, ABCG2, ADAMTSL2, AGER
+
+Temporal Performance:
+Time-lagged Correlation: 0.6832
+DTW Distance: 3.0260
+Direction Accuracy: 0.7085
+Change Magnitude Ratio: 0.7521
+Predictions shape: (8, 49)
+Targets shape: (8, 49)
+
+Gene Analysis Summary:
+
+Top 5 Most Connected Genes:
+ABCA3: 8 connections, correlation: 0.4148
+MCPt4: 7 connections, correlation: 0.7155
+NME3: 7 connections, correlation: 0.2999
+VIM: 7 connections, correlation: 0.5380
+EGFR: 6 connections, correlation: 0.6598
+
+Top 5 Most Variable Genes:
+INMT: range 9.1897, correlation: 0.9765
+EPHA7: range 7.1095, correlation: 0.7622
+SFTP-D: range 6.8913, correlation: 0.8304
+TGFB1: range 6.6275, correlation: 0.8388
+Hist1h2ab: range 6.4284, correlation: 0.8326
+
+Top 5 Best Predicted Genes:
+INMT: correlation 0.9765, connections: 2
+HPGDS: correlation 0.9732, connections: 6
+ABCG2: correlation 0.9337, connections: 3
+AMACR: correlation 0.9215, connections: 3
+MGAT4A: correlation 0.8747, connections: 5
+
+Temporal Analysis:
+Best predicted time point: 2
+Worst predicted time point: 7
+Mean accuracy: 0.7551
+Std of accuracy: 0.1450
